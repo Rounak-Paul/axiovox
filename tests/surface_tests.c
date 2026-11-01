@@ -57,24 +57,24 @@ static bool closed(Edge *items,size_t count)
     return true;
 }
 /** Checks disjoint adaptive leaves against coarser neighbors on positive and negative faces. */
-static bool adaptive_seams(const AxPlanet *planet,unsigned refined)
+static bool adaptive_seams(const AxPlanet *planet,uint8_t refined,uint32_t cells)
 {
-    AxSurfaceRegion regions[15]={0}; Edge *all=NULL; size_t count=0,total=0; bool ok=false;
+    AxSurfaceRegion regions[64]={0}; Edge *all=NULL; size_t count=0,total=0; bool ok=false;
     for (unsigned octant=0;octant<8;++octant) {
-        unsigned children=octant==refined ? 8 : 1;
+        unsigned children=(refined&(1u<<octant)) ? 8 : 1;
         for (unsigned child=0;child<children;++child) {
             double minimum[3]; uint8_t mask=0;
             for (unsigned k=0;k<3;++k) {
                 minimum[k]=(octant&(1u<<k)) ? 0 : -16;
                 if (children==8) {
                     if (child&(1u<<k)) minimum[k]+=8;
-                    if (((octant>>k)&1)!=((child>>k)&1)) mask|=(uint8_t)(1u<<(2*k+((octant&(1u<<k)) ? 0 : 1)));
+                    if (((octant>>k)&1)!=((child>>k)&1) && !(refined&(1u<<(octant^(1u<<k))))) mask|=(uint8_t)(1u<<(2*k+((octant&(1u<<k)) ? 0 : 1)));
                 }
             }
             AxPosition origin;
-            if (!ax_position_from_meters(&origin,minimum) || !ax_surface_build(planet,&origin,children==8 ? 8 : 16,16,mask,&regions[count])) goto cleanup;
+            if (!ax_position_from_meters(&origin,minimum) || !ax_surface_build(planet,&origin,children==8 ? 8 : 16,cells,mask,&regions[count])) goto cleanup;
             AxMeshStats stats;
-            if (!ax_mesh_optimize(&regions[count].mesh,regions[count].extent,regions[count].extent/16,NULL,&stats)) goto cleanup;
+            if (!ax_mesh_optimize(&regions[count].mesh,regions[count].extent,regions[count].extent/cells,NULL,&stats)) goto cleanup;
             total+=regions[count++].mesh.index_count;
         }
     }
@@ -83,7 +83,33 @@ static bool adaptive_seams(const AxPlanet *planet,unsigned refined)
     for (size_t i=0;i<count;++i) { double minimum[3]; ax_position_difference(&regions[i].origin,&zero,minimum); n+=edges(&regions[i],minimum,NULL,all+n); }
     ok=closed(all,n);
 cleanup:
-    free(all); for (size_t i=0;i<15;++i) ax_surface_destroy(&regions[i]); return ok;
+    free(all); for (size_t i=0;i<64;++i) ax_surface_destroy(&regions[i]); return ok;
+}
+/** Rejects zero-width transition sheets on all six faces using a sub-grid surface island. */
+static bool transition_width(void)
+{
+    for (unsigned face=0;face<6;++face) {
+        AxScene scene={0}; AxSurfaceRegion patch={0}; Edge *all=NULL; bool ok=false;
+        AxPlanetDesc desc={.id=1,.radius=1}; AxPosition origin;
+        AxVolumeEdit island={.half_extent={0.6,0.6,0.6},.material=AX_MATERIAL_ROCK};
+        double center[3]={101,101,101}; center[face/2]=(face&1) ? 102 : 100;
+        if (!ax_scene_add_planet(&scene,&desc) || !ax_position_from_meters(&origin,(double[3]){100,100,100}) ||
+            !ax_position_from_meters(&island.position,center) || !ax_scene_edit(&scene,1,&island) ||
+            !ax_surface_build(ax_scene_planet(&scene,1),&origin,2,2,(uint8_t)(1u<<face),&patch)) goto cleanup;
+        double closest=2;
+        for (size_t i=0;i<patch.mesh.index_count;++i) {
+            float p=patch.mesh.vertices[patch.mesh.indices[i]].position[face/2];
+            closest=fmin(closest,(face&1) ? 2-p : p);
+        }
+        if (!patch.mesh.index_count || fabs(closest-0.25)>1e-6) goto cleanup;
+        all=malloc(patch.mesh.index_count*sizeof(*all));
+        if (!all || !closed(all,edges(&patch,(double[3]){0,0,0},NULL,all))) goto cleanup;
+        ok=true;
+cleanup:
+        free(all); ax_surface_destroy(&patch); ax_scene_destroy(&scene);
+        if (!ok) { fprintf(stderr,"transition width face %u\n",face); return false; }
+    }
+    return true;
 }
 /** Validates indexed manifold extraction, smooth normals, exact-plane cases, LOD seams and failure retention. */
 int main(void)
@@ -92,6 +118,7 @@ int main(void)
     AxScene scene={0};
     AxSurfaceRegion coarse={0},fine={0},empty={0};
     Edge *all=NULL;
+    CHECK(transition_width());
     AxPlanetDesc desc={.id=1,.radius=10};
     CHECK(ax_scene_add_planet(&scene,&desc));
     const AxPlanet *planet=ax_scene_planet(&scene,1);
@@ -116,7 +143,15 @@ int main(void)
     size_t n=edges(&coarse,(double[3]){-16,-16,-16},offset,all);
     n+=edges(&fine,offset,NULL,all+n);
     CHECK(closed(all,n));
-    CHECK(adaptive_seams(planet,0) && adaptive_seams(planet,7));
+    CHECK(adaptive_seams(planet,1,16) && adaptive_seams(planet,128,16));
+    for (unsigned mask=0;mask<256;++mask) {
+        if (!adaptive_seams(planet,(uint8_t)mask,4)) { fprintf(stderr,"adaptive mask %u\n",mask); goto cleanup; }
+    }
+    AxPlanetDesc aligned_desc={.id=3,.radius=8};
+    const AxPlanet *aligned=ax_scene_add_planet(&scene,&aligned_desc); CHECK(aligned);
+    for (unsigned mask=0;mask<256;++mask) {
+        if (!adaptive_seams(aligned,(uint8_t)mask,4)) { fprintf(stderr,"aligned adaptive mask %u\n",mask); goto cleanup; }
+    }
     AxVolumeEdit cut={.half_extent={3.25,3.25,3.25},.material=AX_MATERIAL_ROCK,.remove=true};
     CHECK(ax_position_from_meters(&cut.position,(double[3]){-7,5,0}));
     CHECK(ax_scene_edit(&scene,1,&cut));

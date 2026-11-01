@@ -80,8 +80,31 @@ static void cached_normal(const Builder *b,const double p[3],double normal[3])
         for (size_t k=0;k<3;++k) normal[k]+=blend*(coarse[k]-normal[k]);
     }
 }
+/** Applies Lengyel's quarter-cell boundary offset projected onto the vertex tangent plane.
+ * Inactive border faces pin their shared vertices to preserve same-resolution neighbors.
+ */
+static void secondary_position(const Builder *b,const double p[3],const double normal[3],double out[3])
+{
+    double delta[3]={0}; bool active=false;
+    for (unsigned k=0;k<3;++k) {
+        unsigned lower=1u<<(2*k),upper=lower<<1;
+        if ((p[k]==0 && !(b->transition_faces&lower)) ||
+            (p[k]==b->cells*b->step && !(b->transition_faces&upper))) {
+            memcpy(out,p,3*sizeof(*out)); return;
+        }
+        if (p[k]<b->step) {
+            delta[k]=(1-p[k]/b->step)*b->step*0.25;
+            if (b->transition_faces&lower) active=true;
+        } else if (p[k]>(b->cells-1)*b->step) {
+            delta[k]=(b->cells-1-p[k]/b->step)*b->step*0.25;
+            if (b->transition_faces&upper) active=true;
+        }
+    }
+    double along=delta[0]*normal[0]+delta[1]*normal[1]+delta[2]*normal[2];
+    for (size_t k=0;k<3;++k) out[k]=p[k]+(active ? delta[k]-along*normal[k] : 0);
+}
 /** Creates a smooth vertex from the cached field and resolves its exposed material without Newton resampling. */
-static bool append_vertex(Builder *b,const double p[3],uint32_t *index)
+static bool append_vertex(Builder *b,const double p[3],bool movable,uint32_t *index)
 {
     if (!reserve((void **)&b->mesh.vertices,&b->vertex_capacity,b->mesh.vertex_count,1,sizeof(AxSurfaceVertex))) return false;
     AxSurfaceVertex vertex={0};
@@ -89,7 +112,11 @@ static bool append_vertex(Builder *b,const double p[3],uint32_t *index)
     double length=hypot(hypot(normal[0],normal[1]),normal[2]);
     if (!isfinite(length)) return false;
     if (length<1e-12) { normal[0]=0; normal[1]=1; normal[2]=0; length=1; }
-    for (size_t k=0;k<3;++k) { normal[k]/=length; vertex.position[k]=(float)p[k]; vertex.normal[k]=(float)normal[k]; }
+    for (size_t k=0;k<3;++k) normal[k]/=length;
+    double position_out[3];
+    if (movable) secondary_position(b,p,normal,position_out);
+    else memcpy(position_out,p,sizeof(position_out));
+    for (size_t k=0;k<3;++k) { vertex.position[k]=(float)position_out[k]; vertex.normal[k]=(float)normal[k]; }
     AxPosition position=b->origin;
     if (!ax_position_move(&position,p)) return false;
     AxMaterial material=ax_planet_surface_material(b->planet,&position,normal);
@@ -100,7 +127,7 @@ static bool append_vertex(Builder *b,const double p[3],uint32_t *index)
     return true;
 }
 /** Interpolates an edge in canonical endpoint order, making neighboring cells bit-identical. */
-static bool edge_vertex(Builder *b, const uint32_t a[3], const uint32_t c[3], bool shared, uint32_t *index)
+static bool edge_vertex(Builder *b, const uint32_t a[3], const uint32_t c[3], bool shared, bool movable, uint32_t *index)
 {
     const uint32_t *lo = a, *hi = c;
     size_t ia = lattice(b,a), ic = lattice(b,c);
@@ -110,7 +137,7 @@ static bool edge_vertex(Builder *b, const uint32_t a[3], const uint32_t c[3], bo
     if (!isfinite(t)) return false;
     t = fmax(0, fmin(1,t));
     size_t key = SIZE_MAX;
-    if (t == 0 || t == 1) key = (t == 0 ? ia : ic) * 4 + 3;
+    if (movable && (t == 0 || t == 1)) key = (t == 0 ? ia : ic) * 4 + 3;
     else if (shared) {
         size_t axis = lo[0] != hi[0] ? 0 : lo[1] != hi[1] ? 1 : 2;
         key = ia * 4 + axis;
@@ -118,7 +145,7 @@ static bool edge_vertex(Builder *b, const uint32_t a[3], const uint32_t c[3], bo
     if (key != SIZE_MAX && b->cache[key] != UINT32_MAX) { *index = b->cache[key]; return true; }
     double p[3];
     for (size_t k = 0; k < 3; ++k) p[k] = ((double)lo[k] + ((double)hi[k] - lo[k]) * t) * b->step;
-    if (!append_vertex(b,p,index)) return false;
+    if (!append_vertex(b,p,movable,index)) return false;
     if (key != SIZE_MAX) b->cache[key] = *index;
     return true;
 }
@@ -150,7 +177,7 @@ static bool regular_cells(Builder *b)
         uint32_t vertices[12];
         for (uint32_t i=0; i<(uint32_t)(data->geometryCounts>>4); ++i) {
             uint16_t edge = regularVertexData[code][i];
-            if (!edge_vertex(b,corners[(edge>>4)&15],corners[edge&15],true,&vertices[i])) return false;
+            if (!edge_vertex(b,corners[(edge>>4)&15],corners[edge&15],true,true,&vertices[i])) return false;
         }
         for (uint32_t i=0; i<(uint32_t)(data->geometryCounts&15)*3; i+=3)
             if (!triangle(b,vertices[data->vertexIndex[i]],vertices[data->vertexIndex[i+1]],vertices[data->vertexIndex[i+2]])) return false;
@@ -158,7 +185,7 @@ static bool regular_cells(Builder *b)
     return true;
 }
 /** Stitches each fine cube face to the coarser face contour using the published 512 transition cases.
- * Both contours lie on the shared plane: zero-depth cells need no displacement of regular mesh vertices.
+ * Full-resolution vertices share the displaced regular mesh; half-resolution vertices stay on the boundary.
  */
 static bool build_transitions(Builder *b)
 {
@@ -182,7 +209,7 @@ static bool build_transitions(Builder *b)
                 uint16_t edge = transitionVertexData[code][i];
                 uint32_t a=(edge>>4)&15, c=edge&15;
                 bool shared = a<9 && c<9;
-                if (!edge_vertex(b,corners[a],corners[c],shared,&vertices[i])) return false;
+                if (!edge_vertex(b,corners[a],corners[c],shared,shared,&vertices[i])) return false;
             }
             bool reverse = ((cell_class&128)!=0) == ((face&1)!=0);
             for (uint32_t i=0; i<(uint32_t)(data->geometryCounts&15)*3; i+=3) {

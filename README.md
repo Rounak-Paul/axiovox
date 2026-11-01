@@ -88,6 +88,10 @@ vertex-cache/fetch ordering. A two-cell band around chunk boundaries and materia
 seams remains protected. Simplification targets 15% of source triangles, constrained
 by topology and a 0.15-cell absolute error metric; complex terrain may retain more.
 Fine transition faces match the neighboring coarse contour and normal filter.
+Boundary vertices make finite space using Transvoxel's quarter-cell tangent-projected
+offset; inactive border faces stay pinned at chunk edges and corners. Reference:
+[Eric Lengyel's Transvoxel algorithm](https://transvoxel.org/) and the maintained
+[Voxel Tools implementation](https://github.com/Zylann/godot_voxel/tree/master/meshers/transvoxel).
 
 Rendering uses indexed triangles, backface culling, infinite reverse-Z depth,
 directional shadow mapping, an atmosphere/space background, and an offscreen world

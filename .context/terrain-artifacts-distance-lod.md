@@ -1,5 +1,9 @@
 # Terrain artifacts, debug views and distance LOD
 
+Follow-up: `published-terrain-correction.md` supersedes the former zero-width transition
+assumption. Regular boundary vertices now make finite space using tangent-projected offsets.
+
+
 ## Request
 
 Fix screenshot's patterned surface/region artifacts, add default/wireframe/normals
