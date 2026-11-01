@@ -56,6 +56,18 @@ Custom SDK layouts can set `AXIOVOX_MOLTENVK_LIBRARY` (macOS) or
 `AXIOVOX_VULKAN_LOADER` (Windows) to the matching runtime library at configure time.
 `bin/` is generated and ignored by Git.
 
+## World and camera
+
+The world is drawn by ray casting a sparse voxel octree on a single full-screen
+triangle (Laine & Karras, *Efficient Sparse Voxel Octrees*, NVR-2010-001): no
+triangle meshes. Until a scene hierarchy/ECS exists, `src/world/demo_scene.c`
+hardcodes a 256³ world (terrain, pond, trees, ruin) that is built at startup.
+
+Free-flight camera: mouse looks, W/S move along the view direction, A/D strafe,
+E/Q rise/fall along world up, Shift moves 4x faster. The cursor is locked and
+hidden during gameplay; opening the console, pausing, or losing focus releases it.
+HUD icons are pointer targets only while the cursor is free.
+
 ## Game HUD
 
 The voxel-world HUD has a center crosshair, a compact nine-slot hotbar, and two
@@ -196,6 +208,13 @@ narrow viewports, the centered hotbar shrinks to keep clear of the icon strip.
   at runtime. Node callbacks borrow frame context and must not change the registry,
   end rendering, or perform transfers/compute requiring another rendering scope.
   This is an ordered node pipeline, not an automatic resource/dependency graph.
+- `world/`: GPU-independent camera controller, ESVO octree builder/point query, and
+  the temporary demo scene (`axiovox_world`); the `world` render node
+  (`axiovox_world_renderer`) uploads the octree per device and ray casts it in
+  `shaders/world.frag`. Octree words: 64-bit child descriptors (15-bit child
+  pointer, far bit, valid/non-leaf masks, reserved contour word), one attachment
+  lookup entry per descriptor, then ABGR values for every valid child. Non-leaf
+  values are averaged colors for level-of-detail termination by pixel footprint.
 - `ui/`: console state/editor, GPU-independent draw list and HUD layout, and a
   separate Vulkan UI node. The R8 font atlas uses
   the Causality stb_truetype approach and embedded Departure Mono Nerd Font Mono, with
@@ -213,4 +232,5 @@ The logger serializes thread-safe stderr output. The worker pool uses native
 Windows/POSIX threads, a 256-job bounded queue, and explicit submission backpressure.
 Job data remains caller-owned until completion. Workers must return normally and
 must not wait/destroy their own pool or access main-thread services directly.
-Shutdown drains workers, waits for GPU work, and destroys UI, renderer, then window.
+Shutdown drains workers, waits for GPU work, and destroys UI, world node, renderer,
+octree, then window.

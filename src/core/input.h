@@ -22,7 +22,8 @@ typedef struct {
     bool down[AX_KEY_COUNT], pressed[AX_KEY_COUNT], released[AX_KEY_COUNT], repeated[AX_KEY_COUNT];
     bool consumed[AX_KEY_COUNT];
     bool mouse_down[8], mouse_pressed[8], mouse_released[8], captured, focus_lost;
-    double mouse_x, mouse_y, scroll_x, scroll_y;
+    bool pointer_locked, pointer_valid;
+    double mouse_x, mouse_y, mouse_dx, mouse_dy, scroll_x, scroll_y;
 } AxInput;
 /** Resets per-frame transitions before polling OS events. Owner-thread only. */
 void ax_input_begin_frame(AxInput *input);
@@ -43,3 +44,13 @@ bool ax_input_mouse_down(const AxInput *input, unsigned button);
 
 /** Updates pointer-button transitions; consumed by UI before gameplay queries. */
 void ax_input_mouse_button(AxInput *input, unsigned button, bool pressed);
+/** Records a pointer position and accumulates per-frame motion; the first sample after invalidation produces no motion. */
+void ax_input_mouse_move(AxInput *input, double x, double y);
+/** Marks the OS pointer as locked/unlocked for relative look; invalidates motion tracking so mode changes never jump. */
+void ax_input_set_pointer_locked(AxInput *input, bool locked);
+/**
+ * Returns gameplay pointer motion accumulated this frame.
+ * @param dx,dy Receive motion in pointer pixels; zero when UI captures input or the pointer is not locked.
+ * @return true when motion is available to gameplay.
+ */
+bool ax_input_mouse_delta(const AxInput *input, double *dx, double *dy);

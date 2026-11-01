@@ -3,7 +3,7 @@
 #include "config.h"
 #include <vulkan/vulkan.h>
 typedef struct GLFWwindow GLFWwindow;
-typedef struct { GLFWwindow *handle; AxEvents *events; AxInput *input; } AxWindow;
+typedef struct { GLFWwindow *handle; AxEvents *events; AxInput *input; bool cursor_locked; } AxWindow;
 /** Initializes GLFW and a Vulkan-capable window. Main-thread only; one window owns GLFW lifetime. */
 bool ax_window_create(AxWindow *window, AxEvents *events, int width, int height);
 /** Destroys the window and terminates GLFW after renderer shutdown. Accepts an empty window. */
@@ -14,3 +14,6 @@ void ax_window_set_input(AxWindow *window, AxInput *input);
 
 /** Publishes actual logical window dimensions to config before UI/commands run; ignores minimized windows. */
 bool ax_window_sync_config(AxWindow *window, AxConfig *config);
+
+/** Hides and locks the OS cursor for relative look, or restores it; no-op when unchanged. Main-thread only. */
+void ax_window_set_cursor_locked(AxWindow *window, bool locked);

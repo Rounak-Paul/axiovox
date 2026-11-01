@@ -62,6 +62,8 @@ void ax_renderer_destroy(AxRenderer *renderer);
 bool ax_renderer_add_node(AxRenderer *renderer, const char *name, AxRenderNodeFn record, void *user);
 /** Installs the final UI node. Node callbacks must not begin/end rendering or mutate the registry. */
 bool ax_renderer_set_ui(AxRenderer *renderer, AxRenderNodeFn record, void *user);
+/** Drains the GPU, destroys a named scene node's device state, and removes it preserving order; rejects calls during rendering/device changes. */
+bool ax_renderer_remove_node(AxRenderer *renderer, const char *name);
 /** Enables/disables a named scene node between frames. */
 bool ax_renderer_enable_node(AxRenderer *renderer, const char *name, bool enabled);
 /** Acquires, records dynamic rendering, submits, and presents; minimized windows skip work. */

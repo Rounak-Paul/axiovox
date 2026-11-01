@@ -55,3 +55,5 @@ The validation below describes the original loader-based renderer.
   validation enabled. No reported validation errors.
 - One GPU screenshot inspected: legible font, command list, prompt/cursor placement.
 - Windows/Linux execution and Vulkan 1.2-only fallback not independently exercised.
+
+World renderer, camera, cursor lock, and node removal: see `voxel-world-renderer.md`.

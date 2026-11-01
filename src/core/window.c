@@ -39,6 +39,7 @@ void ax_window_destroy(AxWindow *window)
     if (!window || !window->handle) return;
     glfwDestroyWindow(window->handle);
     window->handle = NULL;
+    window->cursor_locked = false;
     glfwTerminate();
 }
 
@@ -97,12 +98,11 @@ static void focus_callback(GLFWwindow *handle, int focused)
     AxWindow *window = glfwGetWindowUserPointer(handle);
     ax_input_focus(window->input, focused != 0);
 }
-/** Updates pointer coordinates in logical window pixels. */
+/** Updates pointer coordinates in logical window pixels and accumulates relative motion. */
 static void cursor_callback(GLFWwindow *handle, double x, double y)
 {
     AxWindow *window = glfwGetWindowUserPointer(handle);
-    window->input->mouse_x = x;
-    window->input->mouse_y = y;
+    ax_input_mouse_move(window->input, x, y);
 }
 /** Updates held pointer button state. */
 static void mouse_callback(GLFWwindow *handle, int button, int action, int mods)
@@ -147,4 +147,19 @@ bool ax_window_sync_config(AxWindow *window, AxConfig *config)
     draft.settings[w - config->settings].value = width;
     draft.settings[h - config->settings].value = height;
     return ax_config_apply(config, &draft);
+}
+
+void ax_window_set_cursor_locked(AxWindow *window, bool locked)
+{
+    if (!window || !window->handle || window->cursor_locked == locked) return;
+    if (glfwRawMouseMotionSupported())
+        glfwSetInputMode(window->handle, GLFW_RAW_MOUSE_MOTION, locked ? GLFW_TRUE : GLFW_FALSE);
+    glfwSetInputMode(window->handle, GLFW_CURSOR, locked ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+    window->cursor_locked = locked;
+    if (window->input) {
+        ax_input_set_pointer_locked(window->input, locked);
+        double x, y;
+        glfwGetCursorPos(window->handle, &x, &y);
+        ax_input_mouse_move(window->input, x, y);
+    }
 }

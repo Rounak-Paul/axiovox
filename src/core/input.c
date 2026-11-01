@@ -1,4 +1,5 @@
 #include "input.h"
+#include <math.h>
 #include <string.h>
 void ax_input_begin_frame(AxInput *input)
 {
@@ -11,6 +12,7 @@ void ax_input_begin_frame(AxInput *input)
     memset(input->mouse_released, 0, sizeof(input->mouse_released));
     input->focus_lost = false;
     input->scroll_x = input->scroll_y = 0;
+    input->mouse_dx = input->mouse_dy = 0;
 }
 void ax_input_key(AxInput *input, AxKey key, bool pressed, bool repeat, int modifiers)
 {
@@ -40,6 +42,8 @@ void ax_input_focus(AxInput *input, bool focused)
         memset(input->mouse_pressed, 0, sizeof(input->mouse_pressed));
         input->scroll_x = input->scroll_y = 0;
     }
+    input->pointer_valid = false;
+    input->mouse_dx = input->mouse_dy = 0;
     AxEvent event = {.type = AX_EVENT_FOCUS, .data.focus = {focused}};
     ax_event_emit(input->events, &event);
 }
@@ -67,4 +71,32 @@ void ax_input_mouse_button(AxInput *input, unsigned button, bool pressed)
     if (pressed && !input->mouse_down[button]) input->mouse_pressed[button] = true;
     if (!pressed && input->mouse_down[button]) input->mouse_released[button] = true;
     input->mouse_down[button] = pressed;
+}
+
+void ax_input_mouse_move(AxInput *input, double x, double y)
+{
+    if (!input || !isfinite(x) || !isfinite(y)) return;
+    if (input->pointer_valid) {
+        input->mouse_dx += x - input->mouse_x;
+        input->mouse_dy += y - input->mouse_y;
+    }
+    input->mouse_x = x;
+    input->mouse_y = y;
+    input->pointer_valid = true;
+}
+
+void ax_input_set_pointer_locked(AxInput *input, bool locked)
+{
+    if (!input) return;
+    input->pointer_locked = locked;
+    input->pointer_valid = false;
+    input->mouse_dx = input->mouse_dy = 0;
+}
+
+bool ax_input_mouse_delta(const AxInput *input, double *dx, double *dy)
+{
+    bool available = input && !input->captured && input->pointer_locked && isfinite(input->mouse_dx) && isfinite(input->mouse_dy);
+    if (dx) *dx = available ? input->mouse_dx : 0;
+    if (dy) *dy = available ? input->mouse_dy : 0;
+    return available;
 }

@@ -6,6 +6,8 @@
 #include "core/log.h"
 #include "renderer/renderer.h"
 #include "ui/ui.h"
+#include "world/demo_scene.h"
+#include "world/world_renderer.h"
 #include <stdio.h>
 #include <GLFW/glfw3.h>
 #include <stdlib.h>
@@ -18,6 +20,9 @@ typedef struct {
     AxCommands commands;
     AxRenderer renderer;
     AxUi ui;
+    AxCamera camera;
+    AxOctree world;
+    AxWorldRenderer world_renderer;
     AxJobs *jobs;
     AxRuntime runtime;
     char settings_path[AX_PATH_CAPACITY];
@@ -134,6 +139,12 @@ int main(int argc, char **argv)
     if (!ax_window_create(&app.window, &events, ax_config_get(&app.config, "window.width")->value, ax_config_get(&app.config, "window.height")->value)) goto cleanup;
     ax_window_set_input(&app.window, &app.input);
     if (!ax_renderer_create(&app.renderer, &app.window, &events, ax_config_get(&app.config, "renderer.device")->value)) goto cleanup;
+    double build_start = glfwGetTime();
+    if (!ax_demo_scene_build(&app.world, &app.camera)) { ax_log(AX_LOG_ERROR, "World generation failed"); goto cleanup; }
+    ax_log(AX_LOG_INFO, "World %u^3: %u descriptors, %u far pointers, %u values, %.1f KiB in %.0f ms",
+           app.world.size, app.world.descriptor_count, app.world.far_count, app.world.value_count,
+           (double)app.world.word_count * sizeof(uint32_t) / 1024.0, (glfwGetTime() - build_start) * 1000.0);
+    if (!ax_world_renderer_create(&app.world_renderer, &app.renderer, &app.world, &app.camera)) { ax_log(AX_LOG_ERROR, "World renderer initialization failed"); goto cleanup; }
     if (!ax_ui_create(&app.ui, &app.renderer, &app.console)) { ax_log(AX_LOG_ERROR, "UI initialization failed"); goto cleanup; }
     if (!configure_hud(&app)) goto cleanup;
     ax_ui_bind_settings(&app.ui, &app.config, app.settings_path);
@@ -148,6 +159,7 @@ int main(int argc, char **argv)
     }
     if (smoke) ax_console_open(&app.console, true);
     unsigned frames = 0;
+    double previous_time = glfwGetTime();
     while (!glfwWindowShouldClose(app.window.handle)) {
         ax_input_begin_frame(&app.input);
         glfwPollEvents();
@@ -159,7 +171,12 @@ int main(int argc, char **argv)
         }
         if (smoke && frames == 4) ax_menu_open_settings(&app.ui.hud.menu);
         if (smoke && frames == 6) app.ui.hud.menu.category = AX_SETTINGS_VIDEO;
-        ax_ui_update(&app.ui, glfwGetTime());
+        double now = glfwGetTime();
+        ax_ui_update(&app.ui, now);
+        ax_camera_update(&app.camera, &app.input, now - previous_time);
+        previous_time = now;
+        ax_window_set_cursor_locked(&app.window, !app.input.captured && glfwGetWindowAttrib(app.window.handle, GLFW_FOCUSED) &&
+                                                 !glfwGetWindowAttrib(app.window.handle, GLFW_ICONIFIED));
         if (!app.runtime.healthy) { ax_log(AX_LOG_ERROR, "Runtime rollback failed"); goto cleanup; }
         if (!ax_renderer_draw(&app.renderer)) { ax_log(AX_LOG_ERROR, "Frame rendering failed"); goto cleanup; }
         if (smoke && ++frames == 8) break;
@@ -172,7 +189,9 @@ cleanup:
     ax_jobs_destroy(app.jobs);
     if (app.renderer.device) vkDeviceWaitIdle(app.renderer.device);
     ax_ui_destroy(&app.ui);
+    ax_world_renderer_destroy(&app.world_renderer);
     ax_renderer_destroy(&app.renderer);
+    ax_octree_destroy(&app.world);
     ax_console_destroy(&app.console);
     ax_window_destroy(&app.window);
     return status;

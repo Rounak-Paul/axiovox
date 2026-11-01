@@ -169,6 +169,21 @@ bool ax_renderer_clear_ui(AxRenderer *r, void *user)
     r->ui_node = (AxRenderNode){0};
     return true;
 }
+bool ax_renderer_remove_node(AxRenderer *r, const char *name)
+{
+    if (!r || !name || r->recording || r->changing) return false;
+    for (size_t i = 0; i < r->node_count; ++i) {
+        if (strcmp(name, r->nodes[i].name)) continue;
+        if (r->nodes[i].destroy_device) {
+            if (vkDeviceWaitIdle(r->device) != VK_SUCCESS) return false;
+            r->nodes[i].destroy_device(r, r->nodes[i].user, r->nodes[i].device_state);
+        }
+        memmove(&r->nodes[i], &r->nodes[i + 1], (r->node_count - i - 1) * sizeof(r->nodes[0]));
+        r->nodes[--r->node_count] = (AxRenderNode){0};
+        return true;
+    }
+    return false;
+}
 bool ax_renderer_enable_node(AxRenderer *r, const char *name, bool enabled)
 {
     if (!r || !name || r->recording || r->changing) return false;

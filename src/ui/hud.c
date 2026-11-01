@@ -69,7 +69,7 @@ void ax_hud_update(AxHud *hud, AxInput *input, AxConsole *console, double time, 
     if (menu_input && ax_menu_update(&hud->menu, input, width / scale, height / scale,
                                     (float)input->mouse_x / scale, (float)input->mouse_y / scale) == AX_MENU_RESUME)
         toggle_pause(hud, input);
-    if (!menu_input && input->mouse_pressed[0]) {
+    if (!menu_input && !input->pointer_locked && input->mouse_pressed[0]) {
         int icon = hit_icon((float)input->mouse_x / scale, (float)input->mouse_y / scale, width / scale, height / scale);
         if (icon == 0) ax_console_open(console, !console->open);
         if (icon == 1) toggle_pause(hud, input);
@@ -124,7 +124,7 @@ static void controls(AxUiCanvas *canvas, const AxHud *hud, const AxConsole *cons
     float x = margin, y = canvas->height - margin - 28;
     const AxInput *input = console->input;
     float scale = ax_hud_scale(hud);
-    int hover = hit_icon((float)input->mouse_x / scale, (float)input->mouse_y / scale, canvas->width, canvas->height);
+    int hover = input->pointer_locked ? -1 : hit_icon((float)input->mouse_x / scale, (float)input->mouse_y / scale, canvas->width, canvas->height);
     ax_ui_panel(canvas, x, y, 28, 28, console->open || hover == 0 ? selected : ink, console->open ? accent : border);
     label(canvas, "/", x + 11, y + 19, x + 24, console->open ? accent : paper);
     x += 34;

@@ -36,13 +36,13 @@ target_link_libraries(axiovox_core PUBLIC Threads::Threads)
 
 set(generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${generated_dir}")
-foreach(stage IN ITEMS vert frag)
+foreach(shader IN ITEMS ui.vert ui.frag world.vert world.frag)
     add_custom_command(
-        OUTPUT "${generated_dir}/ui.${stage}.inc"
-        COMMAND Vulkan::glslc --target-env=vulkan1.2 -mfmt=c
-                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/ui.${stage}"
-                -o "${generated_dir}/ui.${stage}.inc"
-        DEPENDS "shaders/ui.${stage}"
+        OUTPUT "${generated_dir}/${shader}.inc"
+        COMMAND Vulkan::glslc --target-env=vulkan1.2 -O -mfmt=c
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}"
+                -o "${generated_dir}/${shader}.inc"
+        DEPENDS "shaders/${shader}"
         VERBATIM
     )
 endforeach()
@@ -78,6 +78,16 @@ add_library(axiovox_ui STATIC src/ui/ui.c "${generated_dir}/ui.vert.inc" "${gene
 target_include_directories(axiovox_ui PRIVATE "${generated_dir}")
 target_link_libraries(axiovox_ui PUBLIC axiovox_renderer axiovox_ui_layout)
 
+add_library(axiovox_world STATIC src/world/camera.c src/world/octree.c src/world/demo_scene.c)
+target_link_libraries(axiovox_world PUBLIC axiovox_core)
+if(UNIX)
+    target_link_libraries(axiovox_world PUBLIC m)
+endif()
+
+add_library(axiovox_world_renderer STATIC src/world/world_renderer.c "${generated_dir}/world.vert.inc" "${generated_dir}/world.frag.inc")
+target_include_directories(axiovox_world_renderer PRIVATE "${generated_dir}")
+target_link_libraries(axiovox_world_renderer PUBLIC axiovox_renderer axiovox_world)
+
 add_library(axiovox_runtime STATIC src/app/runtime.c)
 target_link_libraries(axiovox_runtime PUBLIC axiovox_renderer)
 
@@ -95,16 +105,16 @@ elseif(MINGW)
 endif()
 add_dependencies(axiovox axiovox_distribution)
 
-set_target_properties(axiovox axiovox_core axiovox_console axiovox_platform axiovox_renderer axiovox_ui axiovox_ui_layout axiovox_runtime PROPERTIES
+set_target_properties(axiovox axiovox_core axiovox_console axiovox_platform axiovox_renderer axiovox_ui axiovox_ui_layout axiovox_runtime axiovox_world axiovox_world_renderer PROPERTIES
     C_STANDARD 17
     C_STANDARD_REQUIRED YES
     C_EXTENSIONS NO
 )
 
 target_link_libraries(axiovox_renderer PRIVATE GPUOpen::VulkanMemoryAllocator)
-target_link_libraries(axiovox PRIVATE axiovox_ui axiovox_runtime)
+target_link_libraries(axiovox PRIVATE axiovox_ui axiovox_runtime axiovox_world_renderer)
 
-foreach(target IN ITEMS axiovox axiovox_core axiovox_console axiovox_platform axiovox_renderer axiovox_ui axiovox_ui_layout axiovox_font axiovox_runtime)
+foreach(target IN ITEMS axiovox axiovox_core axiovox_console axiovox_platform axiovox_renderer axiovox_ui axiovox_ui_layout axiovox_font axiovox_runtime axiovox_world axiovox_world_renderer)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4)
     elseif(CMAKE_C_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
@@ -136,6 +146,12 @@ if(BUILD_TESTING)
     set_target_properties(axiovox_menu_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
     add_test(NAME menu COMMAND axiovox_menu_tests)
     set_tests_properties(menu PROPERTIES TIMEOUT 30)
+
+    add_executable(axiovox_world_tests tests/world_tests.c)
+    target_link_libraries(axiovox_world_tests PRIVATE axiovox_world)
+    set_target_properties(axiovox_world_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    add_test(NAME world COMMAND axiovox_world_tests)
+    set_tests_properties(world PROPERTIES TIMEOUT 60)
 
     add_executable(axiovox_renderer_tests tests/renderer_tests.c)
     target_link_libraries(axiovox_renderer_tests PRIVATE axiovox_renderer)
