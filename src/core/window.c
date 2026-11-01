@@ -28,6 +28,7 @@ bool ax_window_create(AxWindow *window, AxEvents *events, int width, int height)
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     window->handle = glfwCreateWindow(width, height, "Axiovox", NULL, NULL);
     if (!window->handle) { glfwTerminate(); return false; }
+    glfwSetWindowSizeLimits(window->handle, 64, 64, 16384, 16384);
     glfwSetWindowUserPointer(window->handle, window);
     glfwSetFramebufferSizeCallback(window->handle, resize_callback);
     glfwSetWindowCloseCallback(window->handle, close_callback);
@@ -128,4 +129,22 @@ void ax_window_set_input(AxWindow *window, AxInput *input)
     glfwSetCursorPosCallback(window->handle, cursor_callback);
     glfwSetMouseButtonCallback(window->handle, mouse_callback);
     glfwSetScrollCallback(window->handle, scroll_callback);
+}
+
+bool ax_window_sync_config(AxWindow *window, AxConfig *config)
+{
+    if (!window || !window->handle || !config) return false;
+    if (glfwGetWindowAttrib(window->handle, GLFW_ICONIFIED)) return true;
+    int width, height;
+    glfwGetWindowSize(window->handle, &width, &height);
+    if (width <= 0 || height <= 0) return true;
+    const AxSetting *w = ax_config_get(config, "window.width");
+    const AxSetting *h = ax_config_get(config, "window.height");
+    if (!w || !h) return false;
+    if (w->value == width && h->value == height) return true;
+    AxConfig draft;
+    ax_config_stage(&draft, config);
+    draft.settings[w - config->settings].value = width;
+    draft.settings[h - config->settings].value = height;
+    return ax_config_apply(config, &draft);
 }

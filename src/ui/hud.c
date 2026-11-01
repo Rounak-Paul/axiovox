@@ -26,10 +26,22 @@ float ax_hud_scale(const AxHud *hud)
     static const float scales[] = {0.75f, 1.0f, 1.25f, 1.5f, 2.0f};
     return hud->scale_level >= 1 && hud->scale_level <= 5 ? scales[hud->scale_level - 1] : 1.0f;
 }
+/** Returns the hotbar slot size for the logical viewport width and outer margin. */
+static float hotbar_slot(float width, float margin)
+{
+    return floorf(fminf(26, (width - 2 * (margin + 72) - 26) / 9));
+}
+/** Matches control edge spacing to the hotbar panel's bottom gap in logical pixels. */
+static float control_margin(float width, float height)
+{
+    float margin = fminf(20, fmaxf(4, width / 32));
+    float slot = hotbar_slot(width, margin);
+    return width >= 240 && height >= 140 && slot >= 6 ? margin + 18 - slot : margin;
+}
 /** Returns which bottom-left icon contains the pointer, or -1 outside both icons. */
 static int hit_icon(float x, float y, float width, float height)
 {
-    float margin = fminf(20, fmaxf(4, width / 32));
+    float margin = control_margin(width, height);
     if (y < height - margin - 28 || y >= height - margin || x < margin) return -1;
     float offset = x - margin;
     if (offset < 28) return 0;
@@ -88,8 +100,7 @@ void ax_hud_update(AxHud *hud, AxInput *input, AxConsole *console, double time, 
 static void hotbar(const AxHud *hud, AxUiCanvas *canvas, float margin)
 {
     if (canvas->width < 240 || canvas->height < 140) return;
-    float available = canvas->width - 2 * (margin + 72);
-    float slot = floorf(fminf(26, (available - 26) / 9));
+    float slot = hotbar_slot(canvas->width, margin);
     if (slot < 6) return;
     float width = slot * 9 + 16 + 10, x = floorf((canvas->width - width) / 2);
     float y = canvas->height - margin - 28;
@@ -109,6 +120,7 @@ static void hotbar(const AxHud *hud, AxUiCanvas *canvas, float margin)
 /** Draws the two icon-only bottom-left controls and their hover/active states. */
 static void controls(AxUiCanvas *canvas, const AxHud *hud, const AxConsole *console, float margin)
 {
+    margin = control_margin(canvas->width, canvas->height);
     float x = margin, y = canvas->height - margin - 28;
     const AxInput *input = console->input;
     float scale = ax_hud_scale(hud);

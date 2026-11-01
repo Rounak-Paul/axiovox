@@ -39,7 +39,12 @@ static void config_changed(const AxEvent *event, void *user)
     } else if (!strncmp(event->data.config.key, "ui.", 3)) {
         if (!configure_hud(app)) ax_log(AX_LOG_ERROR, "Invalid HUD configuration");
     } else if (app->window.handle && (!strcmp(event->data.config.key, "window.width") || !strcmp(event->data.config.key, "window.height"))) {
-        glfwSetWindowSize(app->window.handle, ax_config_get(&app->config, "window.width")->value, ax_config_get(&app->config, "window.height")->value);
+        int width, height;
+        glfwGetWindowSize(app->window.handle, &width, &height);
+        int desired_width = ax_config_get(&app->config, "window.width")->value;
+        int desired_height = ax_config_get(&app->config, "window.height")->value;
+        if (width != desired_width || height != desired_height)
+            glfwSetWindowSize(app->window.handle, desired_width, desired_height);
     }
 }
 /** Logs the successfully selected device after logical device creation. */
@@ -132,6 +137,7 @@ int main(int argc, char **argv)
     if (!ax_ui_create(&app.ui, &app.renderer, &app.console)) { ax_log(AX_LOG_ERROR, "UI initialization failed"); goto cleanup; }
     if (!configure_hud(&app)) goto cleanup;
     ax_ui_bind_settings(&app.ui, &app.config, app.settings_path);
+    if (!ax_window_sync_config(&app.window, &app.config)) goto cleanup;
     ax_config_mark_applied(&app.config);
     if (!ax_runtime_bind(&app.runtime, &app.config, &app.renderer, app.jobs)) goto cleanup;
     for (int i = 1; i < argc; ++i) {
@@ -145,6 +151,7 @@ int main(int argc, char **argv)
     while (!glfwWindowShouldClose(app.window.handle)) {
         ax_input_begin_frame(&app.input);
         glfwPollEvents();
+        if (!ax_window_sync_config(&app.window, &app.config)) { ax_log(AX_LOG_ERROR, "Could not synchronize window settings"); goto cleanup; }
         if (smoke && frames == 2) {
             ax_console_open(&app.console, false);
             ax_input_key(&app.input, AX_KEY_ESCAPE, true, false, 0);

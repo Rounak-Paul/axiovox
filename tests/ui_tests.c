@@ -102,18 +102,18 @@ int main(void)
     for (uint32_t i = 0; i + 5 < aligned.count; i += 6) {
         float width = vertices[i + 2].x - vertices[i].x, height = vertices[i + 2].y - vertices[i].y;
         if (width == 260 && height == 36) hotbar_top = vertices[i].y;
-        if (width == 28 && height == 28 && vertices[i].x == 20) icons_top = vertices[i].y;
+        if (width == 28 && height == 28 && vertices[i].x == 12) icons_top = vertices[i].y;
     }
-    CHECK(hotbar_top == icons_top && hotbar_top == 672);
+    CHECK(hotbar_top == 672 && icons_top == 680);
     aligned.count = 0; aligned.width = 320; aligned.height = 200;
     ax_hud_draw(&hud, &aligned, &console, 2);
     hotbar_top = -1; icons_top = -2;
     for (uint32_t i = 0; i + 5 < aligned.count; i += 6) {
         float width = vertices[i + 2].x - vertices[i].x, height = vertices[i + 2].y - vertices[i].y;
         if (width == 152 && height == 24) hotbar_top = vertices[i].y;
-        if (width == 28 && height == 28 && vertices[i].x == 10) icons_top = vertices[i].y;
+        if (width == 28 && height == 28 && vertices[i].x == 14) icons_top = vertices[i].y;
     }
-    CHECK(hotbar_top == icons_top && hotbar_top == 162);
+    CHECK(hotbar_top == 162 && icons_top == 158);
     const float sizes[][2] = {{1280,720},{800,600},{320,200},{64,64}};
     for (int level = 1; level <= 5; ++level) {
         CHECK(ax_hud_configure(&hud, level, 9));

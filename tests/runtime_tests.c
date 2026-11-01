@@ -7,8 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 #define CHECK(condition) do { if (!(condition)) { fprintf(stderr, "Failed at line %d: %s\n", __LINE__, #condition); goto cleanup; } } while (0)
-/** Counts successful live selections; aborted changes must not emit selection events. */
-static void selected(const AxEvent *event, void *user) { (void)event; ++*(int *)user; }
+/** Counts observed config changes or successful live device selections. */
+static void count_event(const AxEvent *event, void *user) { (void)event; ++*(int *)user; }
 /** Completes accepted background work exactly once. */
 static void job(void *user) { atomic_fetch_add((atomic_int *)user, 1); }
 typedef struct { AxBuffer buffer; VkDevice device; } NodeDevice;
@@ -56,7 +56,34 @@ int main(void)
     ax_ui_bind_settings(&ui, &config, "runtime-test.cfg");
     jobs = ax_jobs_create(4); CHECK(jobs);
     CHECK(ax_runtime_bind(&runtime, &config, &renderer, jobs));
-    CHECK(ax_event_subscribe(&events, AX_EVENT_DEVICE_SELECTED, selected, &selections));
+    CHECK(ax_event_subscribe(&events, AX_EVENT_DEVICE_SELECTED, count_event, &selections));
+    int config_changes = 0;
+    uint64_t config_listener = ax_event_subscribe(&events, AX_EVENT_CONFIG_CHANGED, count_event, &config_changes);
+    CHECK(config_listener);
+    CHECK(ax_window_sync_config(&window, &config));
+    CHECK(ax_config_get(&config, "window.width")->value == 800);
+    CHECK(ax_config_get(&config, "window.height")->value == 600);
+    CHECK(config_changes == 2);
+    CHECK(ax_window_sync_config(&window, &config) && config_changes == 2);
+    ui.hud.paused = true;
+    CHECK(ax_menu_open_settings(&ui.hud.menu));
+    CHECK(ax_config_set(&ui.hud.menu.draft, "ui.scale", "3"));
+    glfwSetWindowSize(window.handle, 937, 613);
+    glfwPollEvents();
+    CHECK(ax_window_sync_config(&window, &config));
+    int logical_width, logical_height;
+    glfwGetWindowSize(window.handle, &logical_width, &logical_height);
+    CHECK(ax_config_get(&config, "window.width")->value == logical_width);
+    CHECK(ax_config_get(&config, "window.height")->value == logical_height);
+    ax_ui_update(&ui, glfwGetTime());
+    CHECK(ax_config_get(&ui.hud.menu.draft, "window.width")->value == logical_width);
+    CHECK(ax_config_get(&ui.hud.menu.draft, "window.height")->value == logical_height);
+    CHECK(ax_config_get(&ui.hud.menu.draft, "ui.scale")->value == 3);
+    CHECK(config.active_values[0] == logical_width && config.active_values[1] == logical_height);
+    int notifications = config_changes;
+    CHECK(ax_window_sync_config(&window, &config) && config_changes == notifications);
+    ax_event_unsubscribe(&events, config_listener);
+
     ui.hud.active_row = 2; ui.hud.selected_slots[2] = 7; ui.hud.paused = true;
     CHECK(ax_menu_open_settings(&ui.hud.menu));
     CHECK(ax_config_set(&ui.hud.menu.draft, "ui.scale", "3"));

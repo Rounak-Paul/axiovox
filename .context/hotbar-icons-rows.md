@@ -34,3 +34,12 @@ Windows/Linux execution and native mouse/keyboard UI interaction remain unverifi
 Full pause/settings UI and preferences now supersede the simple pause status: see pause-settings-menu.md.
 
 Hotbar alignment now stays level with icons on narrow viewports too: see live-device-workers.md.
+
+## Equal control edge spacing (2026-11-01)
+
+Bottom-left buttons now use the hotbar panel's actual bottom gap for both left
+and bottom spacing (12 logical pixels at the default viewport). Their hit tests
+share this calculation. Narrow viewports derive the gap from the reduced slot
+size; when the hotbar is hidden, controls retain the standard viewport margin.
+Hotbar placement and row markers are unchanged. This supersedes the previous
+matching-top alignment for controls. Existing UI geometry assertions updated.
