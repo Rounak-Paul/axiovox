@@ -1,0 +1,5 @@
+file(READ "${INPUT}" bytes HEX)
+string(REGEX REPLACE "(..)" "0x\\1," bytes "${bytes}")
+string(REPEAT "0x[0-9a-f][0-9a-f]," 16 line_pattern)
+string(REGEX REPLACE "(${line_pattern})" "\\1\n" bytes "${bytes}")
+file(WRITE "${OUTPUT}" "#include <stddef.h>\nconst unsigned char ax_font_data[] = {${bytes}};\nconst size_t ax_font_size = sizeof(ax_font_data);\n")
