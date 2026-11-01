@@ -9,6 +9,8 @@ typedef struct {
     double step;
     uint32_t cells, side;
     uint8_t transition_faces;
+    uint32_t sealed_neighbors;
+    bool caves;
     float *density;
     uint32_t *cache;
     AxSurfaceMesh mesh;
@@ -31,13 +33,18 @@ static bool reserve(void **data, size_t *capacity, size_t count, size_t extra, s
     *data = allocation; *capacity = next;
     return true;
 }
-/** Samples bounded mesh-local coordinates through the precise planet coordinate system. */
-static double sample(const Builder *b, const double p[3], AxMaterial *material)
+/** Decides whether a lattice sample carves caves, omitting them wherever it touches a sealed neighbor.
+ * Every leaf sharing a boundary sample reaches the same answer, because each sees the same touching leaves.
+ */
+static bool sample_carves(const Builder *b,int x,int y,int z)
 {
-    if (material) *material=AX_MATERIAL_AIR;
-    AxPosition position = b->origin;
-    if (!ax_position_move(&position, p)) return INFINITY;
-    return ax_planet_sample(b->planet, &position, material);
+    if (!b->caves) return false;
+    if (!b->sealed_neighbors) return true;
+    int cells=(int)b->cells;
+    int sx=x<=0 ? -1 : x>=cells ? 1 : 0,sy=y<=0 ? -1 : y>=cells ? 1 : 0,sz=z<=0 ? -1 : z>=cells ? 1 : 0;
+    for (unsigned subset=1;subset<8;++subset)
+        if (b->sealed_neighbors&AX_SURFACE_NEIGHBOR((subset&1) ? sx : 0,(subset&2) ? sy : 0,(subset&4) ? sz : 0)) return false;
+    return true;
 }
 /** Addresses the two-cell density halo surrounding the meshing domain. */
 static size_t grid_index(const Builder *b,int x,int y,int z)
@@ -119,9 +126,7 @@ static bool append_vertex(Builder *b,const double p[3],bool movable,uint32_t *in
     for (size_t k=0;k<3;++k) { vertex.position[k]=(float)position_out[k]; vertex.normal[k]=(float)normal[k]; }
     AxPosition position=b->origin;
     if (!ax_position_move(&position,p)) return false;
-    AxMaterial material=ax_planet_surface_material(b->planet,&position,normal);
-    const uint32_t colors[AX_MATERIAL_COUNT]={0xff777777,0xff888b90,0xff42678b,0xff4c9364,0xffb7af94,0xff82b5c9,0xffe5e8ed};
-    vertex.color=colors[material];
+    vertex.color=ax_planet_surface_color(b->planet,&position,b->caves,normal);
     *index=(uint32_t)b->mesh.vertex_count;
     b->mesh.vertices[b->mesh.vertex_count++]=vertex;
     return true;
@@ -221,20 +226,20 @@ static bool build_transitions(Builder *b)
     return true;
 }
 bool ax_surface_build(const AxPlanet *planet, const AxPosition *origin, float extent,
-                      uint32_t cells, uint8_t transition_faces, AxSurfaceRegion *region)
+                      uint32_t cells, uint8_t transition_faces, uint32_t sealed_neighbors, AxSurfaceRegion *region)
 {
     if (!planet || !origin || !region || !isfinite(extent) || extent<=0 || cells<2 || cells>128 || (cells&1) || transition_faces>AX_SURFACE_ALL_FACES) return false;
-    Builder b = {.planet=planet,.origin=*origin,.step=(double)extent/cells,.cells=cells,.side=cells+5,.transition_faces=transition_faces};
+    Builder b = {.planet=planet,.origin=*origin,.step=(double)extent/cells,.cells=cells,.side=cells+5,.transition_faces=transition_faces,.sealed_neighbors=sealed_neighbors,.caves=(double)extent/cells<=AX_SURFACE_CAVE_SPACING};
     if (!ax_position_normalize(&b.origin)) return false;
     AxPosition end=b.origin;
     if (!ax_position_move(&end,(double[3]){extent,extent,extent})) return false;
     const AxPlanetDesc *desc=ax_planet_description(planet);
     double minimum,maximum;
-    if (!ax_planet_density_bounds(planet,&b.origin,extent,&minimum,&maximum)) return false;
+    if (!ax_planet_density_bounds(planet,&b.origin,extent,b.caves,&minimum,&maximum)) return false;
     if (minimum>0 || maximum<0) {
         ax_surface_destroy(region);
         *region=(AxSurfaceRegion){.planet=desc->id,.origin=b.origin,.revision=ax_planet_revision(planet),
-            .extent=extent,.cells=cells,.transition_faces=transition_faces};
+            .extent=extent,.cells=cells,.transition_faces=transition_faces,.sealed_neighbors=sealed_neighbors};
         return true;
     }
     size_t count=(size_t)b.side*b.side*b.side;
@@ -244,14 +249,15 @@ bool ax_surface_build(const AxPlanet *planet, const AxPosition *origin, float ex
     memset(b.cache,255,count*4*sizeof(uint32_t));
     for (int z=-2;z<=(int)cells+2;++z) for (int y=-2;y<=(int)cells+2;++y) for (int x=-2;x<=(int)cells+2;++x) {
         double p[3]={x*b.step,y*b.step,z*b.step};
-        double value=sample(&b,p,NULL);
+        AxPosition position=b.origin;
+        double value=ax_position_move(&position,p) ? ax_planet_sample_lod(planet,&position,sample_carves(&b,x,y,z)) : INFINITY;
         if (!isfinite(value) || fabs(value)>3e38) goto cleanup;
         b.density[grid_index(&b,x,y,z)]=(float)value;
     }
     if (!regular_cells(&b) || (transition_faces && !build_transitions(&b))) goto cleanup;
     ax_surface_destroy(region);
     *region=(AxSurfaceRegion){.mesh=b.mesh,.planet=ax_planet_description(planet)->id,.origin=b.origin,
-        .revision=ax_planet_revision(planet),.extent=extent,.cells=cells,.transition_faces=transition_faces};
+        .revision=ax_planet_revision(planet),.extent=extent,.cells=cells,.transition_faces=transition_faces,.sealed_neighbors=sealed_neighbors};
     b.mesh=(AxSurfaceMesh){0};
     success=true;
 cleanup:

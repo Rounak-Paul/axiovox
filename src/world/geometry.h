@@ -1,6 +1,6 @@
 #pragma once
 #include "surface.h"
-#define AX_WORLD_MAX_REGIONS 2048u
+#define AX_WORLD_MAX_REGIONS 4096u
 /** One indexed draw and its precise scene-space placement. */
 typedef struct {
     AxPosition origin;

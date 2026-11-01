@@ -2,6 +2,8 @@
 #include "geometry.h"
 #include "core/jobs.h"
 #define AX_STREAM_MIN_EXTENT 8.0
+/** Camera travel in meters before the layout is replanned; below the finest leaf's hysteresis band. */
+#define AX_STREAM_REPLAN_DISTANCE 2.0
 typedef struct AxStreamTask AxStreamTask;
 /** Balanced distance-selected octree leaves with atomic geometry publication. */
 typedef struct {

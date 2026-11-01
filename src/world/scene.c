@@ -84,51 +84,107 @@ static double brush_distance(const AxVolumeEdit *edit, const AxPosition *positio
     for (size_t i = 0; i < 3; ++i) q[i] = fabs(p[i]) - edit->half_extent[i];
     return hypot(hypot(fmax(q[0], 0), fmax(q[1], 0)), fmax(q[2], 0)) + fmin(fmax(q[0], fmax(q[1], q[2])), 0);
 }
-/** Evaluates one authoritative field path, with either occupied-volume or extracted-surface material semantics. */
-static double sample_volume(const AxPlanet *planet,const AxPosition *position,AxMaterial *material,const double surface_normal[3])
+/** Applies authored brushes over a field in order, reporting the material of the brush that won the final surface. */
+static double apply_edits(const AxPlanet *planet,const AxPosition *position,double field,AxMaterial *edited)
 {
-    if (material) *material = AX_MATERIAL_AIR;
-    if (!planet || !position) return INFINITY;
-    AxPosition normalized = *position;
-    if (!ax_position_normalize(&normalized)) return INFINITY;
-    double p[3];
-    const AxPosition zero = {0};
-    ax_position_difference(&normalized, &zero, p);
-    const AxPlanetDesc *d = &planet->desc;
-    AxTerrainClimate climate;
-    double field=ax_terrain_density(&planet->terrain,p,material ? &climate : NULL);
-    double surface_depth=material ? hypot(hypot(p[0],p[1]),p[2])-d->radius-climate.elevation : field;
-    AxMaterial result=surface_normal ? AX_MATERIAL_GRASS : surface_depth<-2 ? AX_MATERIAL_ROCK : surface_depth<-0.25 ? AX_MATERIAL_SOIL : AX_MATERIAL_GRASS;
-    if (material && d->terrain_kind==AX_TERRAIN_CONTINENTAL && (surface_normal || surface_depth>=-0.25)) {
-        if (climate.temperature<0.22) result=AX_MATERIAL_SNOW;
-        else if (climate.elevation<d->terrain_height*0.025) result=AX_MATERIAL_SAND;
-        else if (climate.moisture<0.35) result=AX_MATERIAL_SOIL;
-    }
-    if (surface_normal) {
-        double length=hypot(hypot(p[0],p[1]),p[2]);
-        double slope=length>0 ? (surface_normal[0]*p[0]+surface_normal[1]*p[1]+surface_normal[2]*p[2])/length : 1;
-        if (slope<0.65 || field>surface_depth+1e-5) result=AX_MATERIAL_ROCK;
-    }
-    if (d->surface_material != AX_MATERIAL_AIR) result = d->surface_material;
     for (size_t i = 0; i < planet->count; ++i) {
         const AxVolumeEdit *edit = &planet->edits[i];
-        double b = brush_distance(edit, &normalized);
+        double b = brush_distance(edit, position);
         if (edit->remove) {
-            if (-b > field) { field = -b; result = AX_MATERIAL_ROCK; }
-        } else if (b < field) { field = b; result = edit->material; }
+            if (-b > field) { field = -b; if (edited) *edited = AX_MATERIAL_ROCK; }
+        } else if (b < field) { field = b; if (edited) *edited = edit->material; }
     }
-    if (material && (surface_normal || field <= 0)) *material = result;
+    return field;
+}
+/** Resolves a position to normalized planet-local meters; returns false for unaddressable coordinates. */
+static bool local_point(const AxPosition *position,AxPosition *normalized,double p[3])
+{
+    *normalized = *position;
+    if (!ax_position_normalize(normalized)) return false;
+    const AxPosition zero = {0};
+    ax_position_difference(normalized, &zero, p);
+    return true;
+}
+/** Evaluates the terrain and edit field; negative means solid. */
+static double sample_field(const AxPlanet *planet,const AxPosition *position,bool caves,AxMaterial *material)
+{
+    if (material) *material = AX_MATERIAL_AIR;
+    AxPosition normalized;
+    double p[3];
+    if (!planet || !position || !local_point(position,&normalized,p)) return INFINITY;
+    const AxPlanetDesc *d = &planet->desc;
+    AxTerrainClimate climate;
+    double field=ax_terrain_density(&planet->terrain,p,caves,material ? &climate : NULL);
+    AxMaterial result=AX_MATERIAL_GRASS;
+    if (material) {
+        double depth=hypot(hypot(p[0],p[1]),p[2])-d->radius-climate.elevation;
+        result=depth<-2 ? AX_MATERIAL_ROCK : depth<-0.25 ? AX_MATERIAL_SOIL : AX_MATERIAL_GRASS;
+        if (d->terrain_kind==AX_TERRAIN_CONTINENTAL && depth>=-0.25) {
+            if (climate.temperature<0.22) result=AX_MATERIAL_SNOW;
+            else if (climate.elevation<d->terrain_height*0.025) result=AX_MATERIAL_SAND;
+            else if (climate.moisture<0.35) result=AX_MATERIAL_SOIL;
+        }
+        if (d->surface_material != AX_MATERIAL_AIR) result = d->surface_material;
+    }
+    field=apply_edits(planet,&normalized,field,&result);
+    if (material && field <= 0) *material = result;
     return field;
 }
 double ax_planet_sample(const AxPlanet *planet,const AxPosition *position,AxMaterial *material)
 {
-    return sample_volume(planet,position,material,NULL);
+    return sample_field(planet,position,true,material);
 }
-AxMaterial ax_planet_surface_material(const AxPlanet *planet,const AxPosition *position,const double normal[3])
+double ax_planet_sample_lod(const AxPlanet *planet,const AxPosition *position,bool caves)
 {
-    AxMaterial material=AX_MATERIAL_AIR;
-    if (normal) sample_volume(planet,position,&material,normal);
-    return material;
+    return sample_field(planet,position,caves,NULL);
+}
+/** Maps a solid material to its display color, as RGB bytes. */
+static void material_color(AxMaterial material,double rgb[3])
+{
+    static const uint8_t table[AX_MATERIAL_COUNT][3]={{0x77,0x77,0x77},{0x90,0x8b,0x88},{0x8b,0x67,0x42},{0x64,0x93,0x4c},{0x94,0xaf,0xb7},{0xc9,0xb5,0x82},{0xed,0xe8,0xe5}};
+    for (size_t k=0;k<3;++k) rgb[k]=table[material][k];
+}
+/** Blends rgb toward a material color by weight in [0,1]. */
+static void blend_material(double rgb[3],AxMaterial material,double weight)
+{
+    double layer[3];
+    material_color(material,layer);
+    for (size_t k=0;k<3;++k) rgb[k]+=(layer[k]-rgb[k])*weight;
+}
+/** Smooth 0-to-1 ramp from a to b; a may exceed b for a falling ramp. */
+static double ramp(double a,double b,double x)
+{
+    double t=fmax(0,fmin(1,(x-a)/(b-a)));
+    return t*t*(3-2*t);
+}
+uint32_t ax_planet_surface_color(const AxPlanet *planet,const AxPosition *position,bool caves,const double normal[3])
+{
+    AxPosition normalized;
+    double p[3],rgb[3];
+    material_color(AX_MATERIAL_ROCK,rgb);
+    if (planet && position && normal && local_point(position,&normalized,p)) {
+        const AxPlanetDesc *d=&planet->desc;
+        AxTerrainClimate climate;
+        double field=ax_terrain_density(&planet->terrain,p,caves,&climate);
+        double length=hypot(hypot(p[0],p[1]),p[2]);
+        double depth=length-d->radius-climate.elevation;
+        double slope=length>0 ? (normal[0]*p[0]+normal[1]*p[1]+normal[2]*p[2])/length : 1;
+        AxMaterial edited=AX_MATERIAL_AIR;
+        apply_edits(planet,&normalized,field,&edited);
+        if (edited!=AX_MATERIAL_AIR) material_color(edited,rgb);
+        else if (field>depth+1e-5) material_color(AX_MATERIAL_ROCK,rgb);
+        else if (d->surface_material!=AX_MATERIAL_AIR) material_color(d->surface_material,rgb);
+        else {
+            material_color(AX_MATERIAL_GRASS,rgb);
+            if (d->terrain_kind==AX_TERRAIN_CONTINENTAL) {
+                blend_material(rgb,AX_MATERIAL_SOIL,ramp(0.42,0.28,climate.moisture));
+                blend_material(rgb,AX_MATERIAL_SAND,ramp(d->terrain_height*0.04,d->terrain_height*0.01,climate.elevation));
+                blend_material(rgb,AX_MATERIAL_SNOW,ramp(0.28,0.16,climate.temperature));
+            }
+            blend_material(rgb,AX_MATERIAL_ROCK,ramp(0.75,0.55,slope));
+        }
+    }
+    return UINT32_C(0xff000000)|(uint32_t)lround(rgb[2])<<16|(uint32_t)lround(rgb[1])<<8|(uint32_t)lround(rgb[0]);
 }
 bool ax_scene_edit(AxScene *scene, AxPlanetId id, const AxVolumeEdit *edit)
 {
@@ -357,7 +413,7 @@ bool ax_scene_clone(const AxScene *scene, AxScene *copy)
     return true;
 }
 
-bool ax_planet_density_bounds(const AxPlanet *planet,const AxPosition *origin,double extent,double *minimum,double *maximum)
+bool ax_planet_density_bounds(const AxPlanet *planet,const AxPosition *origin,double extent,bool caves,double *minimum,double *maximum)
 {
     if (!planet || !origin || !minimum || !maximum || !isfinite(extent) || extent<=0) return false;
     AxPosition center=*origin;
@@ -369,7 +425,7 @@ bool ax_planet_density_bounds(const AxPlanet *planet,const AxPosition *origin,do
     const AxPlanetDesc *d=&planet->desc;
     double lo=fmax(0,radius-reach)-d->radius-d->terrain_height;
     double hi=radius+reach-d->radius+d->terrain_height;
-    if (d->cave_depth>0) {
+    if (caves && d->cave_depth>0) {
         double cave_max=fmin(-lo-6,hi+d->cave_depth);
         hi=fmax(hi,cave_max);
     }
@@ -381,6 +437,30 @@ bool ax_planet_density_bounds(const AxPlanet *planet,const AxPosition *origin,do
     }
     *minimum=lo; *maximum=hi;
     return true;
+}
+
+bool ax_planet_surface_likely(const AxPlanet *planet,const AxPosition *origin,double extent,bool caves)
+{
+    if (!planet || !origin || !isfinite(extent) || extent<=0) return false;
+    AxPosition center=*origin;
+    if (!ax_position_move(&center,(double[3]){extent/2,extent/2,extent/2})) return false;
+    const AxPosition zero={0};
+    double p[3];
+    ax_position_difference(&center,&zero,p);
+    double reach=extent*0.8660254037844387;
+    for (size_t i=0;i<planet->count;++i) if (fabs(brush_distance(&planet->edits[i],&center))<=reach) return true;
+    double lowest=INFINITY,highest=-INFINITY;
+    for (int z=-1;z<=1;z+=2) for (int y=-1;y<=1;y+=2) for (int x=-1;x<=1;x+=2) {
+        double corner[3]={p[0]+x*extent/2,p[1]+y*extent/2,p[2]+z*extent/2};
+        double height=ax_terrain_height(&planet->terrain,corner,NULL);
+        lowest=fmin(lowest,height); highest=fmax(highest,height);
+    }
+    double height=ax_terrain_height(&planet->terrain,p,NULL);
+    lowest=fmin(lowest,height); highest=fmax(highest,height);
+    const AxPlanetDesc *d=&planet->desc;
+    double radius=hypot(hypot(p[0],p[1]),p[2]),margin=extent+(highest-lowest)*0.5;
+    double band=caves && d->cave_depth>0 ? d->cave_depth+fmax(8,d->cave_depth*0.25) : 0;
+    return radius-reach-d->radius-highest<=margin && radius+reach-d->radius-lowest>=-band-margin;
 }
 
 double ax_planet_terrain_height(const AxPlanet *planet,const double position[3])

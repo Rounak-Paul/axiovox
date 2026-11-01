@@ -11,6 +11,16 @@ layout(push_constant) uniform View {
     uvec4 info;
 } view;
 
+vec2 light_plane(vec3 p)
+{
+    return vec2(dot(p,view.light_right.xyz)+view.light_right.w,dot(p,view.light_up.xyz)+view.light_up.w)/float(view.info.y);
+}
+
+float light_depth(vec3 p)
+{
+    return 0.5-dot(p,view.sun.xyz)/(float(view.info.y)*4.0);
+}
+
 vec3 sky_color(vec3 d)
 {
     if ((view.info.w>>1)!=0u) return vec3(0.018,0.022,0.03);

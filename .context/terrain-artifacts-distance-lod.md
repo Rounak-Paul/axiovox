@@ -1,5 +1,7 @@
 # Terrain artifacts, debug views and distance LOD
 
+Cave LOD, leaf budget, surface color and shadow casting: `terrain-artifact-audit.md` supersedes this file where they disagree.
+
 Follow-up: `published-terrain-correction.md` supersedes the former zero-width transition
 assumption. Regular boundary vertices now make finite space using tangent-projected offsets.
 

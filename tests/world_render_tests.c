@@ -118,10 +118,10 @@ int main(void)
     CHECK(ax_scene_add_planet(&scene,&terra) && ax_scene_add_planet(&scene,&luna));
     AxPosition origin;
     CHECK(ax_position_from_meters(&origin,(double[3]){-16,-16,-16}));
-    CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,32,32,false,&bodies[0]));
+    CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,32,32,false,0,&bodies[0]));
     CHECK(ax_mesh_optimize(&bodies[0].mesh,32,1,NULL,&mesh_stats));
     CHECK(ax_position_from_meters(&origin,(double[3]){-8,-8,-8}));
-    CHECK(ax_surface_build(ax_scene_planet(&scene,2),&origin,16,32,false,&bodies[1]));
+    CHECK(ax_surface_build(ax_scene_planet(&scene,2),&origin,16,32,false,0,&bodies[1]));
     CHECK(ax_mesh_optimize(&bodies[1].mesh,16,0.5f,NULL,&mesh_stats));
     CHECK(ax_world_geometry_build(&scene,bodies,2,&geometry));
     ax_camera_init(&camera,(float[3]){0,0,0},0,0,NULL);
@@ -173,7 +173,7 @@ int main(void)
     CHECK(ax_position_from_meters(&block.position,(double[3]){0,0,11}));
     CHECK(ax_scene_edit(&scene,1,&block));
     CHECK(ax_position_from_meters(&origin,(double[3]){-16,-16,-16}));
-    CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,32,32,false,&bodies[0]));
+    CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,32,32,false,0,&bodies[0]));
     CHECK(ax_mesh_optimize(&bodies[0].mesh,32,1,NULL,&mesh_stats));
     CHECK(ax_world_geometry_build(&scene,bodies,2,&refined));
     CHECK(ax_world_renderer_set_geometry(&world,&refined));
@@ -189,10 +189,10 @@ int main(void)
     CHECK(ax_position_from_meters(&excavation.position,(double[3]){0,0,10}));
     CHECK(ax_scene_edit(&scene,1,&excavation));
     CHECK(ax_position_from_meters(&origin,(double[3]){-4,-4,6}));
-    CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,8,16,AX_SURFACE_ALL_FACES,&bodies[2]));
+    CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,8,16,AX_SURFACE_ALL_FACES,0,&bodies[2]));
     CHECK(ax_mesh_optimize(&bodies[2].mesh,8,0.5f,NULL,&mesh_stats));
     CHECK(ax_position_from_meters(&origin,(double[3]){-16,-16,-16}));
-    CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,32,32,false,&bodies[0]));
+    CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,32,32,false,0,&bodies[0]));
     CHECK(ax_mesh_optimize(&bodies[0].mesh,32,1,(float[4]){12,12,22,8},&mesh_stats));
     CHECK(ax_world_geometry_build(&scene,bodies,3,&refined));
     CHECK(ax_world_renderer_set_geometry(&world,&refined));
@@ -232,7 +232,73 @@ int main(void)
             for (size_t c=0;c<3;++c) if (abs((int)pixels[pixel+c]-baseline[pixel+c])>3) { ++acne; break; }
         }
     CHECK(acne==0);
+    AxSurfaceVertex crease_vertices[6]={0};
+    uint32_t crease_indices[12]={0,2,3,0,3,1,2,4,5,2,5,3};
+    for (size_t i=0;i<6;++i) {
+        float x=(float)(i/2)*80-80,y=(i&1) ? 80 : -80,slope=x<0 ? -0.25f : 0.25f;
+        crease_vertices[i]=(AxSurfaceVertex){.position={x,y,fabsf(x)*0.25f},.normal={-slope*0.97f,0,0.97f},.color=0xff4c9364};
+    }
+    AxSurfaceRegion crease={.planet=1,.extent=256,.mesh={.vertices=crease_vertices,.indices=crease_indices,.vertex_count=6,.index_count=12}};
+    CHECK(ax_world_geometry_build(&scene,&crease,1,&refined));
+    CHECK(ax_world_renderer_set_geometry(&world,&refined));
+    ax_world_geometry_destroy(&geometry); geometry=refined; refined=(AxWorldGeometry){0}; world.geometry=&geometry;
+    world.shadows_enabled=false;
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    memcpy(baseline,pixels,bytes);
+    world.shadows_enabled=true;
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    for (size_t y=renderer.extent.height/3;y<renderer.extent.height*2/3;++y)
+        for (size_t x=renderer.extent.width/3;x<renderer.extent.width*2/3;++x) {
+            size_t pixel=(y*renderer.extent.width+x)*4;
+            for (size_t c=0;c<3;++c) if (abs((int)pixels[pixel+c]-baseline[pixel+c])>3) { ++acne; break; }
+        }
+    CHECK(acne==0);
+    world.shadows_enabled=false;
+    size_t fade_pixel=((size_t)renderer.extent.height/2*renderer.extent.width+renderer.extent.width/2)*4;
+    for (size_t i=0;i<4;++i) plane_vertices[i].color=0xff0000ff;
+    CHECK(ax_world_geometry_build(&scene,&plane,1,&refined));
+    CHECK(ax_world_renderer_set_geometry(&world,&refined));
+    ax_world_geometry_destroy(&geometry); geometry=refined; refined=(AxWorldGeometry){0}; world.geometry=&geometry;
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    int outgoing[3]; for (size_t c=0;c<3;++c) outgoing[c]=pixels[fade_pixel+c];
+    for (size_t i=0;i<4;++i) plane_vertices[i].color=0xffff0000;
+    CHECK(ax_world_geometry_build(&scene,&plane,1,&refined));
+    CHECK(world.fade==0 && ax_world_renderer_fade_geometry(&world,&refined));
+    ax_world_geometry_destroy(&geometry); geometry=refined; refined=(AxWorldGeometry){0}; world.geometry=&geometry;
+    CHECK(world.fade==1 && draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    for (size_t c=0;c<3;++c) CHECK(abs((int)pixels[fade_pixel+c]-outgoing[c])<=1);
+    for (int step=1;step<=6;++step) ax_world_renderer_advance(&world,1.0/48);
+    CHECK(fabsf(world.fade-0.5f)<1e-4f);
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    int blended[3]; for (size_t c=0;c<3;++c) blended[c]=pixels[fade_pixel+c];
+    ax_world_renderer_advance(&world,NAN); ax_world_renderer_advance(&world,-1);
+    CHECK(fabsf(world.fade-0.5f)<1e-4f);
+    ax_world_renderer_advance(&world,10);
+    CHECK(world.fade>0.3f && world.fade<0.4f);
+    for (int step=0;step<16;++step) ax_world_renderer_advance(&world,1.0/30);
+    CHECK(world.fade==0 && draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    for (size_t c=0;c<3;++c) {
+        int incoming=pixels[fade_pixel+c];
+        CHECK(abs(blended[c]-(outgoing[c]+incoming)/2)<=2);
+    }
+    CHECK(abs((int)pixels[fade_pixel]-outgoing[0])+abs((int)pixels[fade_pixel+2]-outgoing[2])>100);
+    world.shadows_enabled=true;
+    CHECK(!ax_world_renderer_fade_geometry(&world,&(AxWorldGeometry){0}) && world.fade==0);
     destroy_capture(&capture);
+    CHECK(ax_world_geometry_build(&scene,&plane,1,&refined));
+    CHECK(ax_world_renderer_fade_geometry(&world,&refined) && world.fade==1);
+    ax_world_geometry_destroy(&geometry); geometry=refined; refined=(AxWorldGeometry){0}; world.geometry=&geometry;
+    CHECK(draw(&renderer,1));
+    glfwSetWindowSize(window.handle,360,280);
+    CHECK(draw(&renderer,4) && world.fade==1);
+    CHECK(ax_renderer_switch_device(&renderer,-1) && world.fade==0 && draw(&renderer,3));
+    CHECK(ax_world_geometry_build(&scene,&plane,1,&refined));
+    CHECK(ax_world_renderer_fade_geometry(&world,&refined) && world.fade==1);
+    ax_world_geometry_destroy(&geometry); geometry=refined; refined=(AxWorldGeometry){0}; world.geometry=&geometry;
+    CHECK(draw(&renderer,1) && ax_world_renderer_set_view(&world,AX_WORLD_VIEW_NORMALS) && world.fade==0 && draw(&renderer,1));
+    CHECK(ax_world_geometry_build(&scene,&plane,1,&refined));
+    CHECK(ax_world_renderer_fade_geometry(&world,&refined) && world.fade==0);
+    ax_world_geometry_destroy(&geometry); geometry=refined; refined=(AxWorldGeometry){0}; world.geometry=&geometry;
     CHECK(ax_world_renderer_set_view(&world,AX_WORLD_VIEW_WIREFRAME));
     CHECK(ax_renderer_switch_device(&renderer,-1) && draw(&renderer,3));
     status=EXIT_SUCCESS;

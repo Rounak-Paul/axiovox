@@ -75,10 +75,6 @@ extern "C" bool ax_mesh_optimize(AxSurfaceMesh *mesh,float extent,float cell_siz
                     p[b]>=exclusion[b]-halo && p[b]<=exclusion[b]+exclusion[3]+halo) locks[i]=meshopt_SimplifyVertex_Lock;
             }
         }
-        for (size_t i=0;i<indices.size();i+=3) for (size_t k=0;k<3;++k) {
-            unsigned int a=indices[i+k],b=indices[i+(k+1)%3];
-            if (vertices[a].color!=vertices[b].color) locks[a]=locks[b]=meshopt_SimplifyVertex_Lock;
-        }
         const float weights[6]={0.05f,0.05f,0.05f,0.1f,0.1f,0.1f};
         size_t target=std::max(size_t(3),indices.size()/20*3);
         std::vector<unsigned int> reduced(indices.size());

@@ -39,12 +39,14 @@ typedef struct {
     AxRuntime runtime;
     char settings_path[AX_PATH_CAPACITY];
 } Application;
-/** Publishes disposable surface assets while preserving the authoritative scene and camera frame. */
-static bool publish_world(Application *app)
+/** Publishes disposable surface assets while preserving the authoritative scene and camera frame.
+ * @param fade Blends over the outgoing layout for streaming updates; false shows it at once, as for a teleport.
+ */
+static bool publish_world(Application *app,bool fade)
 {
     AxWorldGeometry next = {0};
     if (!ax_world_geometry_build(&app->scene, app->stream.regions, app->stream.count, &next)) return false;
-    if (app->world_renderer.renderer && !ax_world_renderer_set_geometry(&app->world_renderer, &next)) {
+    if (app->world_renderer.renderer && !(fade ? ax_world_renderer_fade_geometry : ax_world_renderer_set_geometry)(&app->world_renderer, &next)) {
         ax_world_geometry_destroy(&next);
         return false;
     }
@@ -80,7 +82,7 @@ static bool visit_planet(Application *app, AxPlanetId id)
     if (!ax_world_stream_create(&next, &app->scene, id, &eye, app->jobs)) return false;
     AxWorldStream previous = app->stream;
     app->stream = next;
-    if (!publish_world(app)) {
+    if (!publish_world(app,false)) {
         app->stream = previous;
         ax_world_stream_destroy(&next, app->jobs);
         return false;
@@ -124,7 +126,7 @@ static bool update_world(Application *app)
     }
     if (!ax_gravity_sample(&app->scene,app->active_planet,&app->view_origin,&app->gravity)) return false;
     if (!ax_world_stream_update(&app->stream, &app->scene, app->active_planet, &app->view_origin, app->jobs)) return false;
-    if (app->stream.dirty && !publish_world(app)) return false;
+    if (app->stream.dirty && !(app->world_renderer.fade>0) && !publish_world(app,true)) return false;
     return true;
 }
 /** Parses one finite bounded brush parameter without accepting trailing text. */
@@ -373,6 +375,7 @@ int main(int argc, char **argv)
         app.camera.move_speed = cruise ? (float)fmin(250000, app.flight_speed + fmax(app.altitude, 0) * 0.2) : app.flight_speed;
         ax_camera_align(&app.camera,app.gravity.up,app.gravity.alignment,now-previous_time);
         ax_camera_update(&app.camera, &app.input, now - previous_time);
+        ax_world_renderer_advance(&app.world_renderer, now - previous_time);
         previous_time = now;
         if (!update_world(&app)) {
             if (!app.stream.failed) output(&app, "Terrain streaming update failed; existing planet coverage retained.");

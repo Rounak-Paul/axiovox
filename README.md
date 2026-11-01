@@ -70,17 +70,20 @@ according to Euclidean camera-to-chunk distance, with hysteresis to limit churn.
 This works in every direction and on every planet; altitude does not select LOD.
 The bounded octree cut has no overlapping render volumes, and neighbors remain 2:1
 balanced across faces, edges and corners. Each chunk has 16 cells per side; the
-smallest allowed extent is 8 m (0.5 m spacing), subject to the 2,048-leaf budget.
+smallest allowed extent is 8 m (0.5 m spacing), subject to the 4,096-leaf budget.
 Workers plan against immutable snapshots, reuse matching meshes, and build changed
 chunks in parallel. Complete layouts publish coherently while old coverage remains
 visible. Queue pressure defers work instead of meshing on the render thread.
+Each streamed layout cross-fades over the previous one for 0.25 s, so LOD changes do not pop.
+Both layouts are complete, with their own shadows; teleports and debug views switch at once.
 Resolution is independent of the precise coordinate addressing system.
 
 Terrain composes seeded 3D gradient/value noise, normalized fBm, ridged noise,
 cellular fields and domain warping. Terra combines continental basins, plains, hills,
 mountain provinces, ridges, detail and bounded cave channels. Luna uses layered crater
 bowls/rims and rough highlands. Spherical sampling has no latitude/longitude seams.
-Temperature, moisture, elevation and slope classify grass, soil, rock, sand and snow.
+Temperature, moisture, elevation and slope blend grass, soil, rock, sand and snow continuously.
+Cave channels appear only in chunks with 2 m spacing or finer; coarser chunks cannot resolve them, and channels close at that boundary.
 These are procedural landforms, not simulated erosion, drainage or ocean fluids.
 
 Generated meshes use meshoptimizer for attribute-aware simplification and

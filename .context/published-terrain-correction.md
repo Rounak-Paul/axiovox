@@ -1,5 +1,7 @@
 # Published terrain meshing correction
 
+Cave LOD, leaf budget, surface color and shadow casting: `terrain-artifact-audit.md` supersedes this file where they disagree.
+
 User reports remaining terrain defects after distance-LOD changes. Prior passing tests
 were insufficient evidence of visual correctness. Compare actual implementation to
 Eric Lengyel, Voxel-Based Terrain for Real-Time Virtual Simulations (2010), chapter4,

@@ -47,6 +47,8 @@ const AxPlanetDesc *ax_planet_description(const AxPlanet *planet);
 uint64_t ax_planet_revision(const AxPlanet *planet);
 /** Samples signed solid field and material, including edits; negative means solid. Safe for concurrent reads only. */
 double ax_planet_sample(const AxPlanet *planet, const AxPosition *position, AxMaterial *material);
+/** Samples the field for meshing; caves=false omits procedural channels on lattices too coarse to resolve them. Edits always apply. */
+double ax_planet_sample_lod(const AxPlanet *planet, const AxPosition *position, bool caves);
 /** Appends a validated edit and emits AX_EVENT_WORLD_CHANGED after commit; rejects reentrant mutation. */
 bool ax_scene_edit(AxScene *scene, AxPlanetId id, const AxVolumeEdit *edit);
 /** Returns radial local-up; returns false at planet center or on invalid coordinates. */
@@ -65,11 +67,21 @@ const char *ax_planet_name(AxPlanetId id);
 /** Copies all planets/edits transactionally into an independent snapshot, without event subscriptions. */
 bool ax_scene_clone(const AxScene *scene, AxScene *copy);
 
-/** Bounds density throughout a cube conservatively, including procedural caves and saved edits. */
-bool ax_planet_density_bounds(const AxPlanet *planet,const AxPosition *origin,double extent,double *minimum,double *maximum);
+/** Bounds density throughout a cube conservatively, including saved edits and, when caves is set, procedural channels. */
+bool ax_planet_density_bounds(const AxPlanet *planet,const AxPosition *origin,double extent,bool caves,double *minimum,double *maximum);
+
+/** Estimates whether a cube is worth refining, by sampling terrain height across it and testing edit brushes.
+ * Not conservative: a miss only leaves that cube at its current resolution, so never use this to omit geometry.
+ * @param caves Also counts the procedural channel band beneath the surface.
+ */
+bool ax_planet_surface_likely(const AxPlanet *planet,const AxPosition *origin,double extent,bool caves);
 
 /** Returns unedited radial terrain displacement at a planet-local position. */
 double ax_planet_terrain_height(const AxPlanet *planet,const double position[3]);
 
-/** Resolves the material of an extracted surface without classifying coarse interpolation error as buried rock. */
-AxMaterial ax_planet_surface_material(const AxPlanet *planet,const AxPosition *position,const double normal[3]);
+/** Returns the packed ABGR color of an extracted surface point, blending climate and slope layers continuously
+ * so material borders stay smooth at every mesh resolution.
+ * @param caves Must match the field that produced the surface, so channel walls color as rock only where they exist.
+ * @param normal Unit outward surface normal.
+ */
+uint32_t ax_planet_surface_color(const AxPlanet *planet,const AxPosition *position,bool caves,const double normal[3]);

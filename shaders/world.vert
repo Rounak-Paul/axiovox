@@ -14,9 +14,8 @@ void main()
     surface_normal=normal;
     albedo=vec3(uvec3(color,color>>8,color>>16)&255u)/255.0;
     if (view.info.z!=0u) {
-        float span=view.light_right.w;
-        gl_Position=vec4(dot(p,view.light_right.xyz)/span,-dot(p,view.light_up.xyz)/span,
-            0.5-dot(p,view.sun.xyz)/(span*4.0),1.0);
+        vec2 plane=light_plane(p);
+        gl_Position=vec4(plane.x,-plane.y,light_depth(p),1.0);
     } else {
         float z=dot(p,view.forward.xyz);
         gl_Position=vec4(dot(p,view.right.xyz)/(view.forward.w*view.right.w),

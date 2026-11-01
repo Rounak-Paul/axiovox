@@ -101,6 +101,11 @@ static bool persistence(void)
     CHECK(ax_scene_load(&loaded, path) && loaded.count == 1);
     const AxPlanet *p = ax_scene_planet(&loaded, desc.id);
     AxMaterial material;
+    if (p) {
+        AxPosition high,sea,deep_rock;
+        CHECK(ax_position_from_meters(&high,(double[3]){-8,400100,-8}) && ax_position_from_meters(&sea,(double[3]){-8,399992,-8}) && ax_position_from_meters(&deep_rock,(double[3]){-8,390000,-8}));
+        CHECK(!ax_planet_surface_likely(p,&high,16,true) && ax_planet_surface_likely(p,&sea,16,false) && !ax_planet_surface_likely(p,&deep_rock,16,true));
+    }
     CHECK(p && ax_planet_description(p)->terrain_kind==AX_TERRAIN_CONTINENTAL && ax_planet_description(p)->surface_gravity==9.81 && ax_planet_description(p)->cave_depth==24);
     CHECK(p && ax_planet_sample(p, &edit.position, &material) < 0 && material == AX_MATERIAL_BUILDING);
     const char *invalid[] = {"AXSCENE 99 0\n", "AXSCENE 1 1\n", "AXSCENE 1 18446744073709551616\n",

@@ -76,12 +76,12 @@ double ax_terrain_height(const AxTerrain *t,const double p[3],AxTerrainClimate *
     if (!valid_position(t,p)) { if (climate) *climate=(AxTerrainClimate){0}; return 0; }
     return height_at(t,p,hypot(hypot(p[0],p[1]),p[2]),climate);
 }
-double ax_terrain_density(const AxTerrain *t,const double p[3],AxTerrainClimate *climate)
+double ax_terrain_density(const AxTerrain *t,const double p[3],bool caves,AxTerrainClimate *climate)
 {
     if (!valid_position(t,p)) { if (climate) *climate=(AxTerrainClimate){0}; return INFINITY; }
     double r=hypot(hypot(p[0],p[1]),p[2]);
     double field=r-t->radius-height_at(t,p,r,climate);
-    if (t->cave_depth>0 && field<-3 && field>-t->cave_depth-fmax(8,t->cave_depth*0.25)) {
+    if (caves && t->cave_depth>0 && field<-3 && field>-t->cave_depth-fmax(8,t->cave_depth*0.25)) {
         double scale=1/fmax(32,t->cave_depth);
         double a=fractal(&t->landforms,p,scale,2,0),b=fractal(&t->detail,p,scale,2,0);
         double tube=(hypot(a,b)-0.045)/scale;

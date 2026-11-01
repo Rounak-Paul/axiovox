@@ -8,13 +8,26 @@
 #define AX_SHADOW_RANGE 128.0f
 typedef enum { PIPELINE_SOLID, PIPELINE_LINES, PIPELINE_DEPTH } PipelineView;
 typedef struct { VkImage image; VkDeviceMemory memory; VkImageView view; } Target;
+#define AX_WORLD_FADE_SECONDS 0.25f
+/** Longest frame step a fade advances by, so a stalled frame cannot skip the blend. */
+#define AX_WORLD_FADE_MAX_STEP (1.0f/30.0f)
+/** One uploaded terrain layout with the draw table that places it. */
 typedef struct {
-    AxBuffer vertices, indices, edges, regions[AX_RENDER_FRAMES];
-    Target color, depth, shadow;
+    AxBuffer vertices, indices, edges;
+    AxWorldRegion *regions;
+    size_t count;
+} Cut;
+/** Slot 0 renders the current cut; slot 1 renders the outgoing cut while a fade blends between them. */
+enum { SLOT_CURRENT, SLOT_PREVIOUS, SLOT_COUNT };
+typedef struct {
+    Cut cuts[SLOT_COUNT];
+    AxBuffer regions[SLOT_COUNT][AX_RENDER_FRAMES];
+    Target color[SLOT_COUNT], depth, shadow;
+    bool previous_readable;
     VkExtent2D extent;
     VkDescriptorSetLayout descriptor_layout;
     VkDescriptorPool pool;
-    VkDescriptorSet sets[AX_RENDER_FRAMES];
+    VkDescriptorSet sets[SLOT_COUNT][AX_RENDER_FRAMES];
     VkPipelineLayout layout;
     VkPipeline terrain, shadow_pipeline, sky, composite, wireframe, depth_only;
     VkSampler color_sampler, shadow_sampler;
@@ -66,7 +79,9 @@ static bool create_target(AxRenderer *r,VkFormat format,VkExtent2D extent,VkImag
         .subresourceRange={aspect,0,1,0,1}};
     return vkCreateImageView(r->device,&view,NULL,&target->view)==VK_SUCCESS;
 }
-/** Creates a dynamic-rendering pipeline for indexed terrain, shadow depth, sky, or final compositing. */
+/** Creates a dynamic-rendering pipeline for indexed terrain, shadow depth, sky, or final compositing.
+ * Shadows cast from light-facing-away surfaces: closed terrain then never shadows its own lit side at creases.
+ */
 static VkPipeline pipeline(AxRenderer *r,Device *gpu,const uint32_t *vert,size_t vert_bytes,const uint32_t *frag,size_t frag_bytes,
                             bool mesh,bool shadow,bool offscreen,PipelineView debug)
 {
@@ -90,7 +105,7 @@ static VkPipeline pipeline(AxRenderer *r,Device *gpu,const uint32_t *vert,size_t
     VkPipelineInputAssemblyStateCreateInfo assembly={.sType=VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,.topology=debug==PIPELINE_LINES ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
     VkPipelineViewportStateCreateInfo viewport={.sType=VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,.viewportCount=1,.scissorCount=1};
     VkPipelineRasterizationStateCreateInfo raster={.sType=VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .polygonMode=VK_POLYGON_MODE_FILL,.depthBiasEnable=debug==PIPELINE_LINES,.depthBiasConstantFactor=1,.cullMode=mesh && debug!=PIPELINE_LINES ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE,.frontFace=VK_FRONT_FACE_COUNTER_CLOCKWISE,.lineWidth=1};
+        .polygonMode=VK_POLYGON_MODE_FILL,.depthBiasEnable=debug==PIPELINE_LINES,.depthBiasConstantFactor=1,.cullMode=shadow ? VK_CULL_MODE_FRONT_BIT : mesh && debug!=PIPELINE_LINES ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE,.frontFace=VK_FRONT_FACE_COUNTER_CLOCKWISE,.lineWidth=1};
     VkPipelineMultisampleStateCreateInfo samples={.sType=VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT};
     VkPipelineDepthStencilStateCreateInfo depth={.sType=VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable=mesh,.depthWriteEnable=mesh && debug!=PIPELINE_LINES,.depthCompareOp=shadow ? VK_COMPARE_OP_LESS : debug==PIPELINE_LINES ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_GREATER};
@@ -108,6 +123,13 @@ cleanup:
     if (fragment) vkDestroyShaderModule(r->device,fragment,NULL);
     vkDestroyShaderModule(r->device,vertex,NULL);
     return result;
+}
+/** Releases a cut's buffers and draw table; the device must be idle. Accepts zero state. */
+static void destroy_cut(AxRenderer *r,Cut *cut)
+{
+    ax_buffer_destroy(r,&cut->vertices); ax_buffer_destroy(r,&cut->indices); ax_buffer_destroy(r,&cut->edges);
+    free(cut->regions);
+    *cut=(Cut){0};
 }
 /** Uploads both candidate buffers before touching the current render asset. */
 static bool upload(AxRenderer *r,const AxWorldGeometry *geometry,AxBuffer *vertices,AxBuffer *indices)
@@ -130,6 +152,8 @@ static bool upload(AxRenderer *r,const AxWorldGeometry *geometry,AxBuffer *verti
            ax_buffer_upload(r,indices,geometry->index_count ? geometry->indices : &dummy_index,
                (geometry->index_count ? geometry->index_count : 1)*sizeof(uint32_t),VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 }
+/** Prepares a complete cut, including its own draw table, so it outlives the geometry it was built from. */
+static bool prepare_cut(AxRenderer *r,const AxWorldGeometry *geometry,bool edges,Cut *cut);
 /** Uploads portable triangle-edge indices without requiring optional polygon-mode features. */
 static bool upload_edges(AxRenderer *r,const AxWorldGeometry *geometry,AxBuffer *edges)
 {
@@ -143,6 +167,16 @@ static bool upload_edges(AxRenderer *r,const AxWorldGeometry *geometry,AxBuffer 
     if (!count) data[0]=0;
     bool ok=ax_buffer_upload(r,edges,data,(count ? count : 1)*sizeof(*data),VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
     free(data); return ok;
+}
+static bool prepare_cut(AxRenderer *r,const AxWorldGeometry *geometry,bool edges,Cut *cut)
+{
+    *cut=(Cut){0};
+    if (!upload(r,geometry,&cut->vertices,&cut->indices) || (edges && !upload_edges(r,geometry,&cut->edges))) { destroy_cut(r,cut); return false; }
+    cut->regions=malloc(geometry->count*sizeof(*cut->regions));
+    if (!cut->regions) { destroy_cut(r,cut); return false; }
+    memcpy(cut->regions,geometry->regions,geometry->count*sizeof(*cut->regions));
+    cut->count=geometry->count;
+    return true;
 }
 /** Frees a device-owned world node, accepting incomplete preparation. */
 static void destroy_device(AxRenderer *r,void *user,void *state)
@@ -161,9 +195,12 @@ static void destroy_device(AxRenderer *r,void *user,void *state)
     if (gpu->descriptor_layout) vkDestroyDescriptorSetLayout(r->device,gpu->descriptor_layout,NULL);
     if (gpu->color_sampler) vkDestroySampler(r->device,gpu->color_sampler,NULL);
     if (gpu->shadow_sampler) vkDestroySampler(r->device,gpu->shadow_sampler,NULL);
-    destroy_target(r,&gpu->color); destroy_target(r,&gpu->depth); destroy_target(r,&gpu->shadow);
-    for (size_t i=0; i<AX_RENDER_FRAMES; ++i) ax_buffer_destroy(r,&gpu->regions[i]);
-    ax_buffer_destroy(r,&gpu->vertices); ax_buffer_destroy(r,&gpu->indices); ax_buffer_destroy(r,&gpu->edges); free(gpu);
+    destroy_target(r,&gpu->depth); destroy_target(r,&gpu->shadow);
+    for (size_t slot=0; slot<SLOT_COUNT; ++slot) {
+        destroy_target(r,&gpu->color[slot]); destroy_cut(r,&gpu->cuts[slot]);
+        for (size_t i=0; i<AX_RENDER_FRAMES; ++i) ax_buffer_destroy(r,&gpu->regions[slot][i]);
+    }
+    free(gpu);
 }
 /** Recreates all world pipelines and CPU-derived geometry during startup/device migration. */
 static bool create_device(AxRenderer *r,void *user,void **state)
@@ -171,8 +208,8 @@ static bool create_device(AxRenderer *r,void *user,void **state)
     AxWorldRenderer *world=user;
     Device *gpu=calloc(1,sizeof(*gpu));
     *state=gpu;
-    if (!gpu || !upload(r,world->geometry,&gpu->vertices,&gpu->indices)) return false;
-    if (world->view==AX_WORLD_VIEW_WIREFRAME && !upload_edges(r,world->geometry,&gpu->edges)) return false;
+    world->fade=0;
+    if (!gpu || !prepare_cut(r,world->geometry,world->view==AX_WORLD_VIEW_WIREFRAME,&gpu->cuts[SLOT_CURRENT])) return false;
     VkFormatProperties format;
     vkGetPhysicalDeviceFormatProperties(r->physical,VK_FORMAT_D32_SFLOAT,&format);
     if ((format.optimalTilingFeatures&(VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))!=
@@ -180,21 +217,22 @@ static bool create_device(AxRenderer *r,void *user,void **state)
     VkDescriptorSetLayoutBinding bindings[]={
         {.binding=0,.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,.descriptorCount=1,.stageFlags=VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT},
         {.binding=1,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.descriptorCount=1,.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT},
-        {.binding=2,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.descriptorCount=1,.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT}};
-    VkDescriptorSetLayoutCreateInfo set_layout={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=3,.pBindings=bindings};
+        {.binding=2,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.descriptorCount=1,.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT},
+        {.binding=3,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.descriptorCount=1,.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT}};
+    VkDescriptorSetLayoutCreateInfo set_layout={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=4,.pBindings=bindings};
     if (vkCreateDescriptorSetLayout(r->device,&set_layout,NULL,&gpu->descriptor_layout)!=VK_SUCCESS) return false;
-    VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,AX_RENDER_FRAMES},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,AX_RENDER_FRAMES*2}};
-    VkDescriptorPoolCreateInfo pool={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,.maxSets=AX_RENDER_FRAMES,.poolSizeCount=2,.pPoolSizes=sizes};
+    VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,SLOT_COUNT*AX_RENDER_FRAMES},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,SLOT_COUNT*AX_RENDER_FRAMES*3}};
+    VkDescriptorPoolCreateInfo pool={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,.maxSets=SLOT_COUNT*AX_RENDER_FRAMES,.poolSizeCount=2,.pPoolSizes=sizes};
     if (vkCreateDescriptorPool(r->device,&pool,NULL,&gpu->pool)!=VK_SUCCESS) return false;
-    VkDescriptorSetLayout layouts[AX_RENDER_FRAMES];
-    for (size_t i=0; i<AX_RENDER_FRAMES; ++i) layouts[i]=gpu->descriptor_layout;
+    VkDescriptorSetLayout layouts[SLOT_COUNT*AX_RENDER_FRAMES];
+    for (size_t i=0; i<SLOT_COUNT*AX_RENDER_FRAMES; ++i) layouts[i]=gpu->descriptor_layout;
     VkDescriptorSetAllocateInfo allocate={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,.descriptorPool=gpu->pool,
-        .descriptorSetCount=AX_RENDER_FRAMES,.pSetLayouts=layouts};
-    if (vkAllocateDescriptorSets(r->device,&allocate,gpu->sets)!=VK_SUCCESS) return false;
-    for (size_t i=0; i<AX_RENDER_FRAMES; ++i) {
-        if (!ax_buffer_create(r,&gpu->regions[i],AX_WORLD_MAX_REGIONS*sizeof(GpuRegion),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,true)) return false;
-        VkDescriptorBufferInfo buffer={gpu->regions[i].handle,0,VK_WHOLE_SIZE};
-        VkWriteDescriptorSet write={.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,.dstSet=gpu->sets[i],.dstBinding=0,
+        .descriptorSetCount=SLOT_COUNT*AX_RENDER_FRAMES,.pSetLayouts=layouts};
+    if (vkAllocateDescriptorSets(r->device,&allocate,&gpu->sets[0][0])!=VK_SUCCESS) return false;
+    for (size_t slot=0; slot<SLOT_COUNT; ++slot) for (size_t i=0; i<AX_RENDER_FRAMES; ++i) {
+        if (!ax_buffer_create(r,&gpu->regions[slot][i],AX_WORLD_MAX_REGIONS*sizeof(GpuRegion),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,true)) return false;
+        VkDescriptorBufferInfo buffer={gpu->regions[slot][i].handle,0,VK_WHOLE_SIZE};
+        VkWriteDescriptorSet write={.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,.dstSet=gpu->sets[slot][i],.dstBinding=0,
             .descriptorCount=1,.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,.pBufferInfo=&buffer};
         vkUpdateDescriptorSets(r->device,1,&write,0,NULL);
     }
@@ -224,32 +262,40 @@ static bool ensure_targets(AxWorldRenderer *world,Device *gpu,VkExtent2D extent)
 {
     if (gpu->extent.width==extent.width && gpu->extent.height==extent.height) return true;
     AxRenderer *r=world->renderer;
-    Target color={0},depth={0};
-    if (!create_target(r,r->format,extent,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_COLOR_BIT,&color) ||
-        !create_target(r,VK_FORMAT_D32_SFLOAT,extent,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,VK_IMAGE_ASPECT_DEPTH_BIT,&depth) ||
-        vkDeviceWaitIdle(r->device)!=VK_SUCCESS) { destroy_target(r,&color); destroy_target(r,&depth); return false; }
-    destroy_target(r,&gpu->color); destroy_target(r,&gpu->depth);
-    gpu->color=color; gpu->depth=depth; gpu->extent=extent;
-    for (size_t i=0; i<AX_RENDER_FRAMES; ++i) {
+    Target color[SLOT_COUNT]={{0}},depth={0};
+    bool created=create_target(r,VK_FORMAT_D32_SFLOAT,extent,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,VK_IMAGE_ASPECT_DEPTH_BIT,&depth);
+    for (size_t slot=0; created && slot<SLOT_COUNT; ++slot)
+        created=create_target(r,r->format,extent,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_COLOR_BIT,&color[slot]);
+    if (!created || vkDeviceWaitIdle(r->device)!=VK_SUCCESS) {
+        destroy_target(r,&depth);
+        for (size_t slot=0; slot<SLOT_COUNT; ++slot) destroy_target(r,&color[slot]);
+        return false;
+    }
+    destroy_target(r,&gpu->depth); gpu->depth=depth;
+    for (size_t slot=0; slot<SLOT_COUNT; ++slot) { destroy_target(r,&gpu->color[slot]); gpu->color[slot]=color[slot]; }
+    gpu->extent=extent; gpu->previous_readable=false;
+    for (size_t slot=0; slot<SLOT_COUNT; ++slot) for (size_t i=0; i<AX_RENDER_FRAMES; ++i) {
         VkDescriptorImageInfo images[]={
             {gpu->shadow_sampler,gpu->shadow.view,VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL},
-            {gpu->color_sampler,gpu->color.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-        VkWriteDescriptorSet writes[2];
-        for (uint32_t j=0; j<2; ++j) writes[j]=(VkWriteDescriptorSet){.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet=gpu->sets[i],.dstBinding=j+1,.descriptorCount=1,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.pImageInfo=&images[j]};
-        vkUpdateDescriptorSets(r->device,2,writes,0,NULL);
+            {gpu->color_sampler,gpu->color[SLOT_CURRENT].view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+            {gpu->color_sampler,gpu->color[SLOT_PREVIOUS].view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+        VkWriteDescriptorSet writes[3];
+        for (uint32_t j=0; j<3; ++j) writes[j]=(VkWriteDescriptorSet){.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet=gpu->sets[slot][i],.dstBinding=j+1,.descriptorCount=1,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.pImageInfo=&images[j]};
+        vkUpdateDescriptorSets(r->device,3,writes,0,NULL);
     }
     return true;
 }
 /** Writes camera-relative translations only into the current fence-protected frame slot. */
-static bool update_regions(const AxWorldRenderer *world,Device *gpu,uint32_t frame)
+static bool update_regions(const AxWorldRenderer *world,Device *gpu,size_t slot,uint32_t frame)
 {
     AxPosition eye=world->view_origin;
     double move[3]={world->camera->position[0],world->camera->position[1],world->camera->position[2]};
     if (!ax_position_move(&eye,move)) return false;
-    GpuRegion *out=gpu->regions[frame].mapped;
-    for (size_t i=0; i<world->geometry->count; ++i) {
-        const AxWorldRegion *region=&world->geometry->regions[i];
+    GpuRegion *out=gpu->regions[slot][frame].mapped;
+    const Cut *cut=&gpu->cuts[slot];
+    for (size_t i=0; i<cut->count; ++i) {
+        const AxWorldRegion *region=&cut->regions[i];
         AxPosition local=eye;
         double shift[3],relative[3];
         for (size_t k=0; k<3; ++k) shift[k]=world->frame_center[k]-region->center[k];
@@ -262,7 +308,9 @@ static bool update_regions(const AxWorldRenderer *world,Device *gpu,uint32_t fra
     }
     return true;
 }
-/** Creates shared camera, lighting, atmosphere, shadow and infinite reverse-Z projection constants. */
+/** Creates shared camera, lighting, atmosphere, shadow and infinite reverse-Z projection constants.
+ * Light-plane offsets keep shadow texels fixed in the world, so shadow edges do not crawl as the camera moves.
+ */
 static View view_constants(const AxWorldRenderer *world,VkExtent2D extent)
 {
     View view={0};
@@ -276,8 +324,17 @@ static View view_constants(const AxWorldRenderer *world,VkExtent2D extent)
     view.light_up[0]=world->sun[1]*view.light_right[2];
     view.light_up[1]=world->sun[2]*view.light_right[0]-world->sun[0]*view.light_right[2];
     view.light_up[2]=-world->sun[1]*view.light_right[0];
-    view.light_right[3]=AX_SHADOW_RANGE;
-    view.info[1]=(uint32_t)world->geometry->count;
+    view.info[1]=(uint32_t)AX_SHADOW_RANGE;
+    AxPosition eye=world->view_origin;
+    double move[3]={world->camera->position[0],world->camera->position[1],world->camera->position[2]},center[3];
+    const AxPosition zero={0};
+    if (ax_position_move(&eye,move)) {
+        ax_position_difference(&eye,&zero,center);
+        double texel=2.0*AX_SHADOW_RANGE/AX_SHADOW_SIZE,across=0,along=0;
+        for (size_t k=0;k<3;++k) { across+=center[k]*view.light_right[k]; along+=center[k]*view.light_up[k]; }
+        view.light_right[3]=(float)(across-round(across/texel)*texel);
+        view.light_up[3]=(float)(along-round(along/texel)*texel);
+    }
     view.info[3]=(world->shadows_enabled ? 1u : 0u)|((uint32_t)world->view<<1);
     return view;
 }
@@ -290,35 +347,34 @@ static void barrier(VkCommandBuffer command,Target *target,VkImageAspectFlags as
     vkCmdPipelineBarrier(command,from,to,0,0,NULL,0,NULL,1,&image);
 }
 /** Binds one pipeline, frame descriptor and target viewport. */
-static void bind(const AxRenderFrame *frame,Device *gpu,VkPipeline pipeline,VkExtent2D extent)
+static void bind(const AxRenderFrame *frame,Device *gpu,VkPipeline pipeline,VkExtent2D extent,size_t slot)
 {
     VkViewport viewport={0,0,(float)extent.width,(float)extent.height,0,1};
     VkRect2D scissor={{0,0},extent};
     vkCmdBindPipeline(frame->command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline);
     vkCmdSetViewport(frame->command,0,1,&viewport); vkCmdSetScissor(frame->command,0,1,&scissor);
-    vkCmdBindDescriptorSets(frame->command,VK_PIPELINE_BIND_POINT_GRAPHICS,gpu->layout,0,1,&gpu->sets[frame->frame_index],0,NULL);
+    vkCmdBindDescriptorSets(frame->command,VK_PIPELINE_BIND_POINT_GRAPHICS,gpu->layout,0,1,&gpu->sets[slot][frame->frame_index],0,NULL);
 }
-/** Draws disjoint chunk ranges using triangle or portable line-list indices. */
-static void draw_meshes(const AxRenderFrame *frame,AxWorldRenderer *world,Device *gpu,View *view,bool lines)
+/** Draws one cut's disjoint chunk ranges using triangle or portable line-list indices. */
+static void draw_meshes(const AxRenderFrame *frame,const Cut *cut,Device *gpu,View *view,bool lines)
 {
     VkDeviceSize offset=0;
-    vkCmdBindVertexBuffers(frame->command,0,1,&gpu->vertices.handle,&offset);
-    vkCmdBindIndexBuffer(frame->command,lines ? gpu->edges.handle : gpu->indices.handle,0,VK_INDEX_TYPE_UINT32);
-    for (size_t i=0; i<world->geometry->count; ++i) {
-        const AxWorldRegion *region=&world->geometry->regions[i];
+    vkCmdBindVertexBuffers(frame->command,0,1,&cut->vertices.handle,&offset);
+    vkCmdBindIndexBuffer(frame->command,lines ? cut->edges.handle : cut->indices.handle,0,VK_INDEX_TYPE_UINT32);
+    for (size_t i=0; i<cut->count; ++i) {
+        const AxWorldRegion *region=&cut->regions[i];
         if (!region->index_count) continue;
         view->info[0]=(uint32_t)i;
         vkCmdPushConstants(frame->command,gpu->layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(*view),view);
         vkCmdDrawIndexed(frame->command,region->index_count*(lines ? 2u : 1u),1,region->first_index*(lines ? 2u : 1u),region->vertex_offset,0);
     }
 }
-/** Renders shadow depth and the depth-tested world before the shared swapchain/UI scope opens. */
-static bool prepass(const AxRenderFrame *frame,void *user)
+/** Renders one cut's own shadow depth, then its depth-tested world, into that slot's color target. */
+static bool render_cut(const AxRenderFrame *frame,AxWorldRenderer *world,Device *gpu,size_t slot)
 {
-    AxWorldRenderer *world=user;
-    Device *gpu=frame->device_state;
-    if (!gpu || !ensure_targets(world,gpu,frame->extent) || !update_regions(world,gpu,frame->frame_index)) return false;
+    if (!update_regions(world,gpu,slot,frame->frame_index)) return false;
     View view=view_constants(world,frame->extent);
+    const Cut *cut=&gpu->cuts[slot];
     barrier(frame->command,&gpu->shadow,VK_IMAGE_ASPECT_DEPTH_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         VK_ACCESS_SHADER_READ_BIT,VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
@@ -328,41 +384,58 @@ static bool prepass(const AxRenderFrame *frame,void *user)
     VkRenderingInfoKHR rendering={.sType=VK_STRUCTURE_TYPE_RENDERING_INFO_KHR,.renderArea={{0,0},{AX_SHADOW_SIZE,AX_SHADOW_SIZE}},
         .layerCount=1,.pDepthAttachment=&depth};
     frame->begin_rendering(frame->command,&rendering);
-    bind(frame,gpu,gpu->shadow_pipeline,(VkExtent2D){AX_SHADOW_SIZE,AX_SHADOW_SIZE});
-    view.info[2]=1; if (world->shadows_enabled) draw_meshes(frame,world,gpu,&view,false);
+    bind(frame,gpu,gpu->shadow_pipeline,(VkExtent2D){AX_SHADOW_SIZE,AX_SHADOW_SIZE},slot);
+    view.info[2]=1; if (world->shadows_enabled) draw_meshes(frame,cut,gpu,&view,false);
     frame->end_rendering(frame->command);
     barrier(frame->command,&gpu->shadow,VK_IMAGE_ASPECT_DEPTH_BIT,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    barrier(frame->command,&gpu->color,VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    barrier(frame->command,&gpu->color[slot],VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_ACCESS_SHADER_READ_BIT,VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     barrier(frame->command,&gpu->depth,VK_IMAGE_ASPECT_DEPTH_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
-    VkRenderingAttachmentInfoKHR color={.sType=VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,.imageView=gpu->color.view,
+    VkRenderingAttachmentInfoKHR color={.sType=VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,.imageView=gpu->color[slot].view,
         .imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR,.storeOp=VK_ATTACHMENT_STORE_OP_STORE};
     depth.imageView=gpu->depth.view; depth.clearValue.depthStencil.depth=0;
     rendering.renderArea.extent=frame->extent; rendering.colorAttachmentCount=1; rendering.pColorAttachments=&color;
     frame->begin_rendering(frame->command,&rendering);
-    bind(frame,gpu,gpu->sky,frame->extent);
+    bind(frame,gpu,gpu->sky,frame->extent,slot);
     view.info[2]=0;
     vkCmdPushConstants(frame->command,gpu->layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(view),&view);
     vkCmdDraw(frame->command,3,1,0,0);
     if (world->view==AX_WORLD_VIEW_WIREFRAME) {
-        bind(frame,gpu,gpu->depth_only,frame->extent); draw_meshes(frame,world,gpu,&view,false);
-        bind(frame,gpu,gpu->wireframe,frame->extent); draw_meshes(frame,world,gpu,&view,true);
-    } else { bind(frame,gpu,gpu->terrain,frame->extent); draw_meshes(frame,world,gpu,&view,false); }
+        bind(frame,gpu,gpu->depth_only,frame->extent,slot); draw_meshes(frame,cut,gpu,&view,false);
+        bind(frame,gpu,gpu->wireframe,frame->extent,slot); draw_meshes(frame,cut,gpu,&view,true);
+    } else { bind(frame,gpu,gpu->terrain,frame->extent,slot); draw_meshes(frame,cut,gpu,&view,false); }
     frame->end_rendering(frame->command);
-    barrier(frame->command,&gpu->color,VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    barrier(frame->command,&gpu->color[slot],VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     return true;
 }
-/** Composites the completed world image into the swapchain before UI. */
+/** Renders the current cut and, during a fade, the outgoing cut, before the shared swapchain/UI scope opens. */
+static bool prepass(const AxRenderFrame *frame,void *user)
+{
+    AxWorldRenderer *world=user;
+    Device *gpu=frame->device_state;
+    if (!gpu || !ensure_targets(world,gpu,frame->extent)) return false;
+    if (!gpu->previous_readable) {
+        barrier(frame->command,&gpu->color[SLOT_PREVIOUS],VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            0,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        gpu->previous_readable=true;
+    }
+    if (!render_cut(frame,world,gpu,SLOT_CURRENT)) return false;
+    return !(world->fade>0 && gpu->cuts[SLOT_PREVIOUS].count) || render_cut(frame,world,gpu,SLOT_PREVIOUS);
+}
+/** Composites the completed world image into the swapchain before UI, blending in the outgoing cut during a fade. */
 static bool record(const AxRenderFrame *frame,void *user)
 {
-    (void)user;
+    const AxWorldRenderer *world=user;
     Device *gpu=frame->device_state;
-    if (!gpu || !gpu->color.view) return false;
-    bind(frame,gpu,gpu->composite,frame->extent); vkCmdDraw(frame->command,3,1,0,0);
+    if (!gpu || !gpu->color[SLOT_CURRENT].view) return false;
+    float previous=gpu->cuts[SLOT_PREVIOUS].count ? world->fade : 0;
+    bind(frame,gpu,gpu->composite,frame->extent,SLOT_CURRENT);
+    vkCmdPushConstants(frame->command,gpu->layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(previous),&previous);
+    vkCmdDraw(frame->command,3,1,0,0);
     return true;
 }
 bool ax_world_renderer_create(AxWorldRenderer *world,AxRenderer *renderer,const AxWorldGeometry *geometry,const AxCamera *camera)
@@ -375,7 +448,10 @@ bool ax_world_renderer_create(AxWorldRenderer *world,AxRenderer *renderer,const 
     if (ax_renderer_register_node(renderer,&node)) return true;
     *world=(AxWorldRenderer){0}; return false;
 }
-bool ax_world_renderer_set_geometry(AxWorldRenderer *world,const AxWorldGeometry *geometry)
+/** Installs prepared geometry between frames; keeps the current cut if preparation fails.
+ * @param fade Retains the current cut as the outgoing side of a blend; otherwise it is released at once.
+ */
+static bool publish(AxWorldRenderer *world,const AxWorldGeometry *geometry,bool fade)
 {
     if (!world || !world->renderer) return false;
     AxRenderer *r=world->renderer;
@@ -383,14 +459,29 @@ bool ax_world_renderer_set_geometry(AxWorldRenderer *world,const AxWorldGeometry
     Device *gpu=NULL;
     for (size_t i=0; i<r->node_count; ++i) if (r->nodes[i].user==world && r->nodes[i].record==record) gpu=r->nodes[i].device_state;
     if (!gpu) return false;
-    AxBuffer vertices={0},indices={0},edges={0};
-    if (!upload(r,geometry,&vertices,&indices) || (world->view==AX_WORLD_VIEW_WIREFRAME && !upload_edges(r,geometry,&edges)) || vkDeviceWaitIdle(r->device)!=VK_SUCCESS) {
-        ax_buffer_destroy(r,&vertices); ax_buffer_destroy(r,&indices); ax_buffer_destroy(r,&edges); return false;
-    }
-    ax_buffer_destroy(r,&gpu->vertices); ax_buffer_destroy(r,&gpu->indices);
-    ax_buffer_destroy(r,&gpu->edges); gpu->edges=edges;
-    gpu->vertices=vertices; gpu->indices=indices; world->geometry=geometry;
+    Cut next;
+    if (!prepare_cut(r,geometry,world->view==AX_WORLD_VIEW_WIREFRAME,&next)) return false;
+    if (vkDeviceWaitIdle(r->device)!=VK_SUCCESS) { destroy_cut(r,&next); return false; }
+    destroy_cut(r,&gpu->cuts[SLOT_PREVIOUS]);
+    if (fade) gpu->cuts[SLOT_PREVIOUS]=gpu->cuts[SLOT_CURRENT];
+    else destroy_cut(r,&gpu->cuts[SLOT_CURRENT]);
+    gpu->cuts[SLOT_CURRENT]=next;
+    world->geometry=geometry;
+    world->fade=fade ? 1 : 0;
     return true;
+}
+bool ax_world_renderer_set_geometry(AxWorldRenderer *world,const AxWorldGeometry *geometry)
+{
+    return publish(world,geometry,false);
+}
+bool ax_world_renderer_fade_geometry(AxWorldRenderer *world,const AxWorldGeometry *geometry)
+{
+    return publish(world,geometry,world && world->view==AX_WORLD_VIEW_DEFAULT);
+}
+void ax_world_renderer_advance(AxWorldRenderer *world,double dt)
+{
+    if (!world || !(world->fade>0) || !isfinite(dt) || dt<=0) return;
+    world->fade=fmaxf(0,world->fade-fminf((float)dt,AX_WORLD_FADE_MAX_STEP)/AX_WORLD_FADE_SECONDS);
 }
 void ax_world_renderer_destroy(AxWorldRenderer *world)
 {
@@ -406,6 +497,6 @@ bool ax_world_renderer_set_view(AxWorldRenderer *world,AxWorldView view)
     Device *gpu=NULL;
     for (size_t i=0;i<r->node_count;++i) if (r->nodes[i].user==world && r->nodes[i].record==record) gpu=r->nodes[i].device_state;
     if (!gpu) return false;
-    if (view==AX_WORLD_VIEW_WIREFRAME && !gpu->edges.handle && !upload_edges(r,world->geometry,&gpu->edges)) return false;
-    world->view=view; return true;
+    if (view==AX_WORLD_VIEW_WIREFRAME && !gpu->cuts[SLOT_CURRENT].edges.handle && !upload_edges(r,world->geometry,&gpu->cuts[SLOT_CURRENT].edges)) return false;
+    world->view=view; world->fade=0; return true;
 }

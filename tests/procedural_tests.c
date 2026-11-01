@@ -60,7 +60,7 @@ static bool terrain_tests(void)
         CHECK(ax_position_from_meters(&origin,p));
         CHECK(ax_position_move(&origin,(double[3]){-8,-8,-8}));
         double minimum,maximum;
-        CHECK(ax_planet_density_bounds(planet,&origin,16,&minimum,&maximum));
+        CHECK(ax_planet_density_bounds(planet,&origin,16,true,&minimum,&maximum));
         for (unsigned j=0;j<8;++j) {
             AxPosition point=origin;
             CHECK(ax_position_move(&point,(double[3]){(j&1)*16,((j>>1)&1)*16,((j>>2)&1)*16}));
@@ -76,7 +76,7 @@ static bool terrain_tests(void)
     CHECK(ax_position_from_meters(&edit.position,(double[3]){0,d.radius,0}));
     CHECK(ax_scene_edit(&scene,1,&edit));
     double minimum,maximum;
-    CHECK(ax_planet_density_bounds(planet,&edit.position,32,&minimum,&maximum));
+    CHECK(ax_planet_density_bounds(planet,&edit.position,32,true,&minimum,&maximum));
     CHECK(minimum<=maximum);
     ax_scene_destroy(&scene);
     return true;

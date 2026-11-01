@@ -70,7 +70,7 @@ int main(void)
     ax_world_stream_destroy(&serial,NULL);
     CHECK(valid_cut(&stream));
     float near=extent_at(&stream,1,(double[3]){1,128,1}); CHECK(near<=16);
-    CHECK(isfinite(extent_at(&stream,2,(double[3]){1,31,1})));
+    CHECK(extent_at(&stream,2,(double[3]){1,31,1})<=luna.radius);
     CHECK(ax_world_geometry_build(&scene,stream.regions,stream.count,&geometry));
     CHECK(geometry.count==stream.count);
     for (size_t i=0;i<geometry.count;++i) CHECK((size_t)geometry.regions[i].first_index+geometry.regions[i].index_count<=geometry.index_count);

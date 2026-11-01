@@ -15,5 +15,7 @@ typedef struct { double elevation,temperature,moisture; } AxTerrainClimate;
 bool ax_terrain_init(AxTerrain *terrain,AxTerrainKind kind,uint64_t seed,double radius,double relief,double frequency,double cave_depth);
 /** Returns bounded radial displacement; position is planet-local meters. climate may be NULL. */
 double ax_terrain_height(const AxTerrain *terrain,const double position[3],AxTerrainClimate *climate);
-/** Samples negative-inside solid density, including bounded subsurface caves. */
-double ax_terrain_density(const AxTerrain *terrain,const double position[3],AxTerrainClimate *climate);
+/** Samples negative-inside solid density.
+ * @param caves Carves bounded subsurface channels; disable on lattices too coarse to resolve them.
+ */
+double ax_terrain_density(const AxTerrain *terrain,const double position[3],bool caves,AxTerrainClimate *climate);
