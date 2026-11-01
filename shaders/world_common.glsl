@@ -11,21 +11,9 @@ layout(push_constant) uniform View {
     uvec4 info;
 } view;
 
-// Finer regions own their volume, including empty excavations.
-bool covered_by_finer(vec3 p)
-{
-    Region current=regions.items[view.info.x];
-    for (uint i=0u;i<view.info.y;++i) {
-        Region finer=regions.items[i];
-        if (finer.offset_extent.w>=current.offset_extent.w || any(notEqual(finer.identity.xy,current.identity.xy))) continue;
-        vec3 local=p-finer.offset_extent.xyz;
-        if (all(greaterThanEqual(local,vec3(0.0))) && all(lessThanEqual(local,vec3(finer.offset_extent.w)))) return true;
-    }
-    return false;
-}
-
 vec3 sky_color(vec3 d)
 {
+    if ((view.info.w>>1)!=0u) return vec3(0.018,0.022,0.03);
     float elevation=dot(d,view.local_up.xyz);
     float atmosphere=view.sun.w>0.0 ? exp(-max(view.local_up.w,0.0)/view.sun.w) : 0.0;
     float daylight=clamp(dot(view.local_up.xyz,view.sun.xyz)*2.0+0.2,0.025,1.0);

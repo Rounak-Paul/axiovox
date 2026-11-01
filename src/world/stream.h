@@ -1,13 +1,14 @@
 #pragma once
 #include "geometry.h"
 #include "core/jobs.h"
-#define AX_STREAM_DETAIL_LEVELS 40u
-#define AX_STREAM_BASE_EXTENT 32.0
+#define AX_STREAM_MIN_EXTENT 8.0
 typedef struct AxStreamTask AxStreamTask;
-/** Coherent nested surface meshes with complete whole-body coverage. Only one immutable layout job runs at once. */
+/** Balanced distance-selected octree leaves with atomic geometry publication. */
 typedef struct {
-    AxSurfaceRegion regions[AX_WORLD_MAX_REGIONS];
-    size_t count;
+    AxSurfaceRegion *regions;
+    AxPosition planned_eye;
+    AxPlanetId planned_frame;
+    size_t count, source_count;
     uint64_t epoch;
     AxStreamTask *task;
     bool dirty, failed;

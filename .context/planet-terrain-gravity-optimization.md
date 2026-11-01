@@ -1,5 +1,8 @@
 # Planet terrain, gravity and mesh optimization
 
+Streaming/surface details below are historical. Current distance-based adaptive chunks,
+face masks, normal filters and shadows: `terrain-artifacts-distance-lod.md`.
+
 ## Scope and decisions
 
 Implemented composed planetary terrain, gravity-aware free flight, and low-polygon

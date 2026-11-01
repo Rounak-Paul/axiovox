@@ -6,16 +6,17 @@
 #include <string.h>
 #define AX_SHADOW_SIZE 1024u
 #define AX_SHADOW_RANGE 128.0f
+typedef enum { PIPELINE_SOLID, PIPELINE_LINES, PIPELINE_DEPTH } PipelineView;
 typedef struct { VkImage image; VkDeviceMemory memory; VkImageView view; } Target;
 typedef struct {
-    AxBuffer vertices, indices, regions[AX_RENDER_FRAMES];
+    AxBuffer vertices, indices, edges, regions[AX_RENDER_FRAMES];
     Target color, depth, shadow;
     VkExtent2D extent;
     VkDescriptorSetLayout descriptor_layout;
     VkDescriptorPool pool;
     VkDescriptorSet sets[AX_RENDER_FRAMES];
     VkPipelineLayout layout;
-    VkPipeline terrain, shadow_pipeline, sky, composite;
+    VkPipeline terrain, shadow_pipeline, sky, composite, wireframe, depth_only;
     VkSampler color_sampler, shadow_sampler;
 } Device;
 typedef struct { float offset_extent[4]; uint32_t identity[4]; } GpuRegion;
@@ -67,7 +68,7 @@ static bool create_target(AxRenderer *r,VkFormat format,VkExtent2D extent,VkImag
 }
 /** Creates a dynamic-rendering pipeline for indexed terrain, shadow depth, sky, or final compositing. */
 static VkPipeline pipeline(AxRenderer *r,Device *gpu,const uint32_t *vert,size_t vert_bytes,const uint32_t *frag,size_t frag_bytes,
-                            bool mesh,bool shadow,bool offscreen)
+                            bool mesh,bool shadow,bool offscreen,PipelineView debug)
 {
     VkShaderModule vertex=VK_NULL_HANDLE,fragment=VK_NULL_HANDLE;
     VkPipeline result=VK_NULL_HANDLE;
@@ -86,14 +87,14 @@ static VkPipeline pipeline(AxRenderer *r,Device *gpu,const uint32_t *vert,size_t
     VkPipelineVertexInputStateCreateInfo input={.sType=VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount=mesh ? 1 : 0,.pVertexBindingDescriptions=&binding,
         .vertexAttributeDescriptionCount=mesh ? 3 : 0,.pVertexAttributeDescriptions=attributes};
-    VkPipelineInputAssemblyStateCreateInfo assembly={.sType=VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineInputAssemblyStateCreateInfo assembly={.sType=VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,.topology=debug==PIPELINE_LINES ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
     VkPipelineViewportStateCreateInfo viewport={.sType=VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,.viewportCount=1,.scissorCount=1};
     VkPipelineRasterizationStateCreateInfo raster={.sType=VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .polygonMode=VK_POLYGON_MODE_FILL,.cullMode=mesh ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE,.frontFace=VK_FRONT_FACE_COUNTER_CLOCKWISE,.lineWidth=1};
+        .polygonMode=VK_POLYGON_MODE_FILL,.depthBiasEnable=debug==PIPELINE_LINES,.depthBiasConstantFactor=1,.cullMode=mesh && debug!=PIPELINE_LINES ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE,.frontFace=VK_FRONT_FACE_COUNTER_CLOCKWISE,.lineWidth=1};
     VkPipelineMultisampleStateCreateInfo samples={.sType=VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT};
     VkPipelineDepthStencilStateCreateInfo depth={.sType=VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable=mesh,.depthWriteEnable=mesh,.depthCompareOp=shadow ? VK_COMPARE_OP_LESS : VK_COMPARE_OP_GREATER};
-    VkPipelineColorBlendAttachmentState attachment={.colorWriteMask=VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT};
+        .depthTestEnable=mesh,.depthWriteEnable=mesh && debug!=PIPELINE_LINES,.depthCompareOp=shadow ? VK_COMPARE_OP_LESS : debug==PIPELINE_LINES ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_GREATER};
+    VkPipelineColorBlendAttachmentState attachment={.colorWriteMask=debug==PIPELINE_DEPTH ? 0 : VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT};
     VkPipelineColorBlendStateCreateInfo blend={.sType=VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,.attachmentCount=shadow ? 0 : 1,.pAttachments=&attachment};
     VkDynamicState dynamic_states[]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamic={.sType=VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,.dynamicStateCount=2,.pDynamicStates=dynamic_states};
@@ -129,12 +130,28 @@ static bool upload(AxRenderer *r,const AxWorldGeometry *geometry,AxBuffer *verti
            ax_buffer_upload(r,indices,geometry->index_count ? geometry->indices : &dummy_index,
                (geometry->index_count ? geometry->index_count : 1)*sizeof(uint32_t),VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 }
+/** Uploads portable triangle-edge indices without requiring optional polygon-mode features. */
+static bool upload_edges(AxRenderer *r,const AxWorldGeometry *geometry,AxBuffer *edges)
+{
+    if (geometry->index_count>UINT32_MAX/2 || geometry->index_count>SIZE_MAX/(2*sizeof(uint32_t))) return false;
+    size_t count=geometry->index_count*2;
+    uint32_t *data=malloc((count ? count : 1)*sizeof(*data));
+    if (!data) return false;
+    for (size_t i=0;i<geometry->index_count;i+=3) for (size_t k=0;k<3;++k) {
+        data[i*2+k*2]=geometry->indices[i+k]; data[i*2+k*2+1]=geometry->indices[i+(k+1)%3];
+    }
+    if (!count) data[0]=0;
+    bool ok=ax_buffer_upload(r,edges,data,(count ? count : 1)*sizeof(*data),VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+    free(data); return ok;
+}
 /** Frees a device-owned world node, accepting incomplete preparation. */
 static void destroy_device(AxRenderer *r,void *user,void *state)
 {
     (void)user;
     Device *gpu=state;
     if (!gpu) return;
+    if (gpu->wireframe) vkDestroyPipeline(r->device,gpu->wireframe,NULL);
+    if (gpu->depth_only) vkDestroyPipeline(r->device,gpu->depth_only,NULL);
     if (gpu->terrain) vkDestroyPipeline(r->device,gpu->terrain,NULL);
     if (gpu->shadow_pipeline) vkDestroyPipeline(r->device,gpu->shadow_pipeline,NULL);
     if (gpu->sky) vkDestroyPipeline(r->device,gpu->sky,NULL);
@@ -146,7 +163,7 @@ static void destroy_device(AxRenderer *r,void *user,void *state)
     if (gpu->shadow_sampler) vkDestroySampler(r->device,gpu->shadow_sampler,NULL);
     destroy_target(r,&gpu->color); destroy_target(r,&gpu->depth); destroy_target(r,&gpu->shadow);
     for (size_t i=0; i<AX_RENDER_FRAMES; ++i) ax_buffer_destroy(r,&gpu->regions[i]);
-    ax_buffer_destroy(r,&gpu->vertices); ax_buffer_destroy(r,&gpu->indices); free(gpu);
+    ax_buffer_destroy(r,&gpu->vertices); ax_buffer_destroy(r,&gpu->indices); ax_buffer_destroy(r,&gpu->edges); free(gpu);
 }
 /** Recreates all world pipelines and CPU-derived geometry during startup/device migration. */
 static bool create_device(AxRenderer *r,void *user,void **state)
@@ -155,6 +172,7 @@ static bool create_device(AxRenderer *r,void *user,void **state)
     Device *gpu=calloc(1,sizeof(*gpu));
     *state=gpu;
     if (!gpu || !upload(r,world->geometry,&gpu->vertices,&gpu->indices)) return false;
+    if (world->view==AX_WORLD_VIEW_WIREFRAME && !upload_edges(r,world->geometry,&gpu->edges)) return false;
     VkFormatProperties format;
     vkGetPhysicalDeviceFormatProperties(r->physical,VK_FORMAT_D32_SFLOAT,&format);
     if ((format.optimalTilingFeatures&(VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))!=
@@ -193,11 +211,13 @@ static bool create_device(AxRenderer *r,void *user,void **state)
     if (vkCreateSampler(r->device,&sampler,NULL,&gpu->shadow_sampler)!=VK_SUCCESS) return false;
     if (!create_target(r,VK_FORMAT_D32_SFLOAT,(VkExtent2D){AX_SHADOW_SIZE,AX_SHADOW_SIZE},
                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT,&gpu->shadow)) return false;
-    gpu->terrain=pipeline(r,gpu,terrain_vertex,sizeof(terrain_vertex),terrain_fragment,sizeof(terrain_fragment),true,false,true);
-    gpu->shadow_pipeline=pipeline(r,gpu,terrain_vertex,sizeof(terrain_vertex),shadow_fragment,sizeof(shadow_fragment),true,true,true);
-    gpu->sky=pipeline(r,gpu,fullscreen_vertex,sizeof(fullscreen_vertex),sky_fragment,sizeof(sky_fragment),false,false,true);
-    gpu->composite=pipeline(r,gpu,fullscreen_vertex,sizeof(fullscreen_vertex),composite_fragment,sizeof(composite_fragment),false,false,false);
-    return gpu->terrain && gpu->shadow_pipeline && gpu->sky && gpu->composite;
+    gpu->terrain=pipeline(r,gpu,terrain_vertex,sizeof(terrain_vertex),terrain_fragment,sizeof(terrain_fragment),true,false,true,0);
+    gpu->shadow_pipeline=pipeline(r,gpu,terrain_vertex,sizeof(terrain_vertex),shadow_fragment,sizeof(shadow_fragment),true,true,true,0);
+    gpu->sky=pipeline(r,gpu,fullscreen_vertex,sizeof(fullscreen_vertex),sky_fragment,sizeof(sky_fragment),false,false,true,0);
+    gpu->composite=pipeline(r,gpu,fullscreen_vertex,sizeof(fullscreen_vertex),composite_fragment,sizeof(composite_fragment),false,false,false,0);
+    gpu->wireframe=pipeline(r,gpu,terrain_vertex,sizeof(terrain_vertex),terrain_fragment,sizeof(terrain_fragment),true,false,true,PIPELINE_LINES);
+    gpu->depth_only=pipeline(r,gpu,terrain_vertex,sizeof(terrain_vertex),shadow_fragment,sizeof(shadow_fragment),true,false,true,PIPELINE_DEPTH);
+    return gpu->wireframe && gpu->depth_only && gpu->terrain && gpu->shadow_pipeline && gpu->sky && gpu->composite;
 }
 /** Stages resize attachments before retiring old targets and rewriting descriptors while idle. */
 static bool ensure_targets(AxWorldRenderer *world,Device *gpu,VkExtent2D extent)
@@ -258,7 +278,7 @@ static View view_constants(const AxWorldRenderer *world,VkExtent2D extent)
     view.light_up[2]=-world->sun[1]*view.light_right[0];
     view.light_right[3]=AX_SHADOW_RANGE;
     view.info[1]=(uint32_t)world->geometry->count;
-    view.info[3]=world->shadows_enabled ? 1u : 0u;
+    view.info[3]=(world->shadows_enabled ? 1u : 0u)|((uint32_t)world->view<<1);
     return view;
 }
 /** Records an explicit image barrier between an attachment and shader reads. */
@@ -278,18 +298,18 @@ static void bind(const AxRenderFrame *frame,Device *gpu,VkPipeline pipeline,VkEx
     vkCmdSetViewport(frame->command,0,1,&viewport); vkCmdSetScissor(frame->command,0,1,&scissor);
     vkCmdBindDescriptorSets(frame->command,VK_PIPELINE_BIND_POINT_GRAPHICS,gpu->layout,0,1,&gpu->sets[frame->frame_index],0,NULL);
 }
-/** Draws indexed terrain front-to-back by LOD, allowing depth testing to reject coarse overdraw. */
-static void draw_meshes(const AxRenderFrame *frame,AxWorldRenderer *world,Device *gpu,View *view)
+/** Draws disjoint chunk ranges using triangle or portable line-list indices. */
+static void draw_meshes(const AxRenderFrame *frame,AxWorldRenderer *world,Device *gpu,View *view,bool lines)
 {
     VkDeviceSize offset=0;
     vkCmdBindVertexBuffers(frame->command,0,1,&gpu->vertices.handle,&offset);
-    vkCmdBindIndexBuffer(frame->command,gpu->indices.handle,0,VK_INDEX_TYPE_UINT32);
+    vkCmdBindIndexBuffer(frame->command,lines ? gpu->edges.handle : gpu->indices.handle,0,VK_INDEX_TYPE_UINT32);
     for (size_t i=0; i<world->geometry->count; ++i) {
         const AxWorldRegion *region=&world->geometry->regions[i];
         if (!region->index_count) continue;
         view->info[0]=(uint32_t)i;
         vkCmdPushConstants(frame->command,gpu->layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(*view),view);
-        vkCmdDrawIndexed(frame->command,region->index_count,1,region->first_index,region->vertex_offset,0);
+        vkCmdDrawIndexed(frame->command,region->index_count*(lines ? 2u : 1u),1,region->first_index*(lines ? 2u : 1u),region->vertex_offset,0);
     }
 }
 /** Renders shadow depth and the depth-tested world before the shared swapchain/UI scope opens. */
@@ -309,7 +329,7 @@ static bool prepass(const AxRenderFrame *frame,void *user)
         .layerCount=1,.pDepthAttachment=&depth};
     frame->begin_rendering(frame->command,&rendering);
     bind(frame,gpu,gpu->shadow_pipeline,(VkExtent2D){AX_SHADOW_SIZE,AX_SHADOW_SIZE});
-    view.info[2]=1; if (world->shadows_enabled) draw_meshes(frame,world,gpu,&view);
+    view.info[2]=1; if (world->shadows_enabled) draw_meshes(frame,world,gpu,&view,false);
     frame->end_rendering(frame->command);
     barrier(frame->command,&gpu->shadow,VK_IMAGE_ASPECT_DEPTH_BIT,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
@@ -327,7 +347,10 @@ static bool prepass(const AxRenderFrame *frame,void *user)
     view.info[2]=0;
     vkCmdPushConstants(frame->command,gpu->layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(view),&view);
     vkCmdDraw(frame->command,3,1,0,0);
-    bind(frame,gpu,gpu->terrain,frame->extent); draw_meshes(frame,world,gpu,&view);
+    if (world->view==AX_WORLD_VIEW_WIREFRAME) {
+        bind(frame,gpu,gpu->depth_only,frame->extent); draw_meshes(frame,world,gpu,&view,false);
+        bind(frame,gpu,gpu->wireframe,frame->extent); draw_meshes(frame,world,gpu,&view,true);
+    } else { bind(frame,gpu,gpu->terrain,frame->extent); draw_meshes(frame,world,gpu,&view,false); }
     frame->end_rendering(frame->command);
     barrier(frame->command,&gpu->color,VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
@@ -360,11 +383,12 @@ bool ax_world_renderer_set_geometry(AxWorldRenderer *world,const AxWorldGeometry
     Device *gpu=NULL;
     for (size_t i=0; i<r->node_count; ++i) if (r->nodes[i].user==world && r->nodes[i].record==record) gpu=r->nodes[i].device_state;
     if (!gpu) return false;
-    AxBuffer vertices={0},indices={0};
-    if (!upload(r,geometry,&vertices,&indices) || vkDeviceWaitIdle(r->device)!=VK_SUCCESS) {
-        ax_buffer_destroy(r,&vertices); ax_buffer_destroy(r,&indices); return false;
+    AxBuffer vertices={0},indices={0},edges={0};
+    if (!upload(r,geometry,&vertices,&indices) || (world->view==AX_WORLD_VIEW_WIREFRAME && !upload_edges(r,geometry,&edges)) || vkDeviceWaitIdle(r->device)!=VK_SUCCESS) {
+        ax_buffer_destroy(r,&vertices); ax_buffer_destroy(r,&indices); ax_buffer_destroy(r,&edges); return false;
     }
     ax_buffer_destroy(r,&gpu->vertices); ax_buffer_destroy(r,&gpu->indices);
+    ax_buffer_destroy(r,&gpu->edges); gpu->edges=edges;
     gpu->vertices=vertices; gpu->indices=indices; world->geometry=geometry;
     return true;
 }
@@ -372,4 +396,16 @@ void ax_world_renderer_destroy(AxWorldRenderer *world)
 {
     if (!world || !world->renderer) return;
     ax_renderer_remove_node(world->renderer,"world"); *world=(AxWorldRenderer){0};
+}
+
+bool ax_world_renderer_set_view(AxWorldRenderer *world,AxWorldView view)
+{
+    if (!world || !world->renderer || view<AX_WORLD_VIEW_DEFAULT || view>AX_WORLD_VIEW_NORMALS) return false;
+    AxRenderer *r=world->renderer;
+    if (r->recording || r->changing || r->failed) return false;
+    Device *gpu=NULL;
+    for (size_t i=0;i<r->node_count;++i) if (r->nodes[i].user==world && r->nodes[i].record==record) gpu=r->nodes[i].device_state;
+    if (!gpu) return false;
+    if (view==AX_WORLD_VIEW_WIREFRAME && !gpu->edges.handle && !upload_edges(r,world->geometry,&gpu->edges)) return false;
+    world->view=view; return true;
 }

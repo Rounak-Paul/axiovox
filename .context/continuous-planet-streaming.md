@@ -6,7 +6,7 @@ World model and persistence: `solid-planet-world.md`.
 User requires one continuous scene from surface to space, like Google Earth, without
 separate globe models or scene switching. Terra and its moon Luna remain in shared
 space. Camera-relative GPU rendering and precise planet-local positions preserve
-movement precision. Detail follows the nearest surface without changing camera pose.
+movement precision. Each planet uses distance-selected fixed chunks without changing camera pose.
 
 The original octree-forest streamer has been replaced by coherent triangle-mesh LOD
 layouts. Worker snapshots isolate edits and loading from in-flight generation. Old
@@ -20,3 +20,5 @@ world.visit is an optional navigation convenience. Moon position is currently st
 Terrain, optimizer and gravity-aware free flight now follow
 `planet-terrain-gravity-optimization.md`. Changed region work is parallel; whole layouts
 still commit coherently. Gravity alignment fades into space without falling or mode switches.
+
+Current LOD selection, stitching, debug views and validation: `terrain-artifacts-distance-lod.md`.

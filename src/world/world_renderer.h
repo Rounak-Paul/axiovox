@@ -2,6 +2,7 @@
 #include "camera.h"
 #include "geometry.h"
 #include "renderer/renderer.h"
+typedef enum { AX_WORLD_VIEW_DEFAULT, AX_WORLD_VIEW_WIREFRAME, AX_WORLD_VIEW_NORMALS } AxWorldView;
 /** Triangle terrain node; scene volumes remain GPU-independent and geometry is borrowed until replaced. */
 typedef struct {
     AxRenderer *renderer;
@@ -11,6 +12,7 @@ typedef struct {
     double frame_center[3];
     float local_up[3], altitude, atmosphere_height, sun[3];
     bool shadows_enabled;
+    AxWorldView view;
 } AxWorldRenderer;
 /** Uploads triangle geometry and registers the world node; camera and geometry must outlive registration. */
 bool ax_world_renderer_create(AxWorldRenderer *world, AxRenderer *renderer, const AxWorldGeometry *geometry, const AxCamera *camera);
@@ -18,3 +20,6 @@ bool ax_world_renderer_create(AxWorldRenderer *world, AxRenderer *renderer, cons
 bool ax_world_renderer_set_geometry(AxWorldRenderer *world, const AxWorldGeometry *geometry);
 /** Drains/releases device resources; accepts NULL/zero state. Call before destroying the renderer. */
 void ax_world_renderer_destroy(AxWorldRenderer *world);
+
+/** Selects the default, depth-tested wireframe or normal view between frames. */
+bool ax_world_renderer_set_view(AxWorldRenderer *world, AxWorldView view);

@@ -1,6 +1,6 @@
 #pragma once
 #include "surface.h"
-#define AX_WORLD_MAX_REGIONS 64u
+#define AX_WORLD_MAX_REGIONS 2048u
 /** One indexed draw and its precise scene-space placement. */
 typedef struct {
     AxPosition origin;
@@ -15,9 +15,9 @@ typedef struct {
     AxSurfaceVertex *vertices;
     uint32_t *indices;
     size_t vertex_count, index_count, count;
-    AxWorldRegion regions[AX_WORLD_MAX_REGIONS];
+    AxWorldRegion *regions;
 } AxWorldGeometry;
-/** Packs meshes into draw ranges transactionally, retaining empty regions as finer-volume ownership masks. */
+/** Packs meshes into draw ranges transactionally, retaining empty leaves for spatial coverage. */
 bool ax_world_geometry_build(const AxScene *scene, const AxSurfaceRegion *regions, size_t count, AxWorldGeometry *geometry);
 /** Releases packed render data; accepts NULL/zero state. */
 void ax_world_geometry_destroy(AxWorldGeometry *geometry);

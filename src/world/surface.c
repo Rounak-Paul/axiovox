@@ -8,6 +8,7 @@ typedef struct {
     AxPosition origin;
     double step;
     uint32_t cells, side;
+    uint8_t transition_faces;
     float *density;
     uint32_t *cache;
     AxSurfaceMesh mesh;
@@ -38,10 +39,10 @@ static double sample(const Builder *b, const double p[3], AxMaterial *material)
     if (!ax_position_move(&position, p)) return INFINITY;
     return ax_planet_sample(b->planet, &position, material);
 }
-/** Addresses the one-cell density halo surrounding the meshing domain. */
+/** Addresses the two-cell density halo surrounding the meshing domain. */
 static size_t grid_index(const Builder *b,int x,int y,int z)
 {
-    return ((size_t)(z+1)*b->side+(size_t)(y+1))*b->side+(size_t)(x+1);
+    return ((size_t)(z+2)*b->side+(size_t)(y+2))*b->side+(size_t)(x+2);
 }
 /** Resolves a lattice point into the shared sample/edge cache. */
 static size_t lattice(const Builder *b,const uint32_t p[3])
@@ -49,17 +50,34 @@ static size_t lattice(const Builder *b,const uint32_t p[3])
     return grid_index(b,(int)p[0],(int)p[1],(int)p[2]);
 }
 /** Interpolates cached central differences instead of resampling procedural noise per mesh vertex. */
-static void cached_normal(const Builder *b,const double p[3],double normal[3])
+static void cached_gradient(const Builder *b,const double p[3],int stride,double normal[3])
 {
     int cell[3]; double t[3];
-    for (size_t k=0;k<3;++k) { cell[k]=(int)fmax(0,fmin(b->cells-1,floor(p[k]/b->step))); t[k]=p[k]/b->step-cell[k]; normal[k]=0; }
+    for (size_t k=0;k<3;++k) {
+        cell[k]=(int)fmax(0,fmin(b->cells-stride,floor(p[k]/b->step/stride)*stride));
+        t[k]=(p[k]/b->step-cell[k])/stride; normal[k]=0;
+    }
     for (unsigned i=0;i<8;++i) {
-        int q[3]={cell[0]+(int)(i&1),cell[1]+(int)((i>>1)&1),cell[2]+(int)((i>>2)&1)};
+        int q[3]={cell[0]+(int)(i&1)*stride,cell[1]+(int)((i>>1)&1)*stride,cell[2]+(int)((i>>2)&1)*stride};
         double weight=((i&1) ? t[0] : 1-t[0])*((i&2) ? t[1] : 1-t[1])*((i&4) ? t[2] : 1-t[2]);
         for (size_t k=0;k<3;++k) {
-            int a[3]={q[0],q[1],q[2]},c[3]={q[0],q[1],q[2]}; ++a[k]; --c[k];
-            normal[k]+=weight*(b->density[grid_index(b,a[0],a[1],a[2])]-b->density[grid_index(b,c[0],c[1],c[2])])/(2*b->step);
+            int a[3]={q[0],q[1],q[2]},c[3]={q[0],q[1],q[2]}; a[k]+=stride; c[k]-=stride;
+            normal[k]+=weight*(b->density[grid_index(b,a[0],a[1],a[2])]-b->density[grid_index(b,c[0],c[1],c[2])])/(2*b->step*stride);
         }
+    }
+}
+/** Matches the coarser neighbor's normal filter on transition planes, blending within two fine cells. */
+static void cached_normal(const Builder *b,const double p[3],double normal[3])
+{
+    cached_gradient(b,p,1,normal);
+    double blend=0;
+    for (unsigned face=0;face<6;++face) if (b->transition_faces&(1u<<face)) {
+        double distance=(face&1) ? b->cells*b->step-p[face/2] : p[face/2];
+        blend=fmax(blend,fmax(0,1-distance/(2*b->step)));
+    }
+    if (blend>0) {
+        double coarse[3]; cached_gradient(b,p,2,coarse);
+        for (size_t k=0;k<3;++k) normal[k]+=blend*(coarse[k]-normal[k]);
     }
 }
 /** Creates a smooth vertex from the cached field and resolves its exposed material without Newton resampling. */
@@ -142,10 +160,11 @@ static bool regular_cells(Builder *b)
 /** Stitches each fine cube face to the coarser face contour using the published 512 transition cases.
  * Both contours lie on the shared plane: zero-depth cells need no displacement of regular mesh vertices.
  */
-static bool transition_faces(Builder *b)
+static bool build_transitions(Builder *b)
 {
     const unsigned order[9] = {0,1,2,5,8,7,6,3,4};
     for (uint32_t face=0; face<6; ++face) {
+        if (!(b->transition_faces&(1u<<face))) continue;
         uint32_t axis=face/2, u=(axis+1)%3, v=(axis+2)%3;
         for (uint32_t y=0; y<b->cells; y+=2) for (uint32_t x=0; x<b->cells; x+=2) {
             uint32_t corners[13][3] = {{0}}, code=0;
@@ -175,10 +194,10 @@ static bool transition_faces(Builder *b)
     return true;
 }
 bool ax_surface_build(const AxPlanet *planet, const AxPosition *origin, float extent,
-                      uint32_t cells, bool transitions, AxSurfaceRegion *region)
+                      uint32_t cells, uint8_t transition_faces, AxSurfaceRegion *region)
 {
-    if (!planet || !origin || !region || !isfinite(extent) || extent<=0 || cells<2 || cells>128 || (cells&1)) return false;
-    Builder b = {.planet=planet,.origin=*origin,.step=(double)extent/cells,.cells=cells,.side=cells+3};
+    if (!planet || !origin || !region || !isfinite(extent) || extent<=0 || cells<2 || cells>128 || (cells&1) || transition_faces>AX_SURFACE_ALL_FACES) return false;
+    Builder b = {.planet=planet,.origin=*origin,.step=(double)extent/cells,.cells=cells,.side=cells+5,.transition_faces=transition_faces};
     if (!ax_position_normalize(&b.origin)) return false;
     AxPosition end=b.origin;
     if (!ax_position_move(&end,(double[3]){extent,extent,extent})) return false;
@@ -188,7 +207,7 @@ bool ax_surface_build(const AxPlanet *planet, const AxPosition *origin, float ex
     if (minimum>0 || maximum<0) {
         ax_surface_destroy(region);
         *region=(AxSurfaceRegion){.planet=desc->id,.origin=b.origin,.revision=ax_planet_revision(planet),
-            .extent=extent,.cells=cells,.transitions=transitions};
+            .extent=extent,.cells=cells,.transition_faces=transition_faces};
         return true;
     }
     size_t count=(size_t)b.side*b.side*b.side;
@@ -196,16 +215,16 @@ bool ax_surface_build(const AxPlanet *planet, const AxPosition *origin, float ex
     bool success=false;
     if (!b.density || !b.cache) goto cleanup;
     memset(b.cache,255,count*4*sizeof(uint32_t));
-    for (int z=-1;z<=(int)cells+1;++z) for (int y=-1;y<=(int)cells+1;++y) for (int x=-1;x<=(int)cells+1;++x) {
+    for (int z=-2;z<=(int)cells+2;++z) for (int y=-2;y<=(int)cells+2;++y) for (int x=-2;x<=(int)cells+2;++x) {
         double p[3]={x*b.step,y*b.step,z*b.step};
         double value=sample(&b,p,NULL);
         if (!isfinite(value) || fabs(value)>3e38) goto cleanup;
         b.density[grid_index(&b,x,y,z)]=(float)value;
     }
-    if (!regular_cells(&b) || (transitions && !transition_faces(&b))) goto cleanup;
+    if (!regular_cells(&b) || (transition_faces && !build_transitions(&b))) goto cleanup;
     ax_surface_destroy(region);
     *region=(AxSurfaceRegion){.mesh=b.mesh,.planet=ax_planet_description(planet)->id,.origin=b.origin,
-        .revision=ax_planet_revision(planet),.extent=extent,.cells=cells,.transitions=transitions};
+        .revision=ax_planet_revision(planet),.extent=extent,.cells=cells,.transition_faces=transition_faces};
     b.mesh=(AxSurfaceMesh){0};
     success=true;
 cleanup:

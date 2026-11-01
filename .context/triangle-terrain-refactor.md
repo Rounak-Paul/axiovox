@@ -1,5 +1,8 @@
 # Triangle terrain refactor
 
+Streaming/surface details below are historical. Current distance-based adaptive chunks,
+face masks, normal filters and shadows: `terrain-artifacts-distance-lod.md`.
+
 ## Accepted direction
 
 Retain authoritative solid voxel/density planets, precise coordinates, edits, saves,

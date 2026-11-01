@@ -269,6 +269,13 @@ static bool command(int argc, const char *const *argv, void *user)
         glfwSetWindowShouldClose(app->window.handle, GLFW_TRUE);
         return true;
     }
+    if (!strcmp(argv[0], "renderer.view")) {
+        const char *modes[]={"default","wireframe","normals"};
+        if (argc==1) { output(app,modes[app->world_renderer.view]); return true; }
+        if (argc==2) for (size_t i=0;i<3;++i) if (!strcmp(argv[1],modes[i]))
+            return ax_world_renderer_set_view(&app->world_renderer,(AxWorldView)i);
+        output(app,"Usage: /renderer.view default|wireframe|normals"); return false;
+    }
     if (!strcmp(argv[0], "renderer.nodes") && argc == 1) {
         for (size_t i = 0; i < app->renderer.node_count; ++i) output(app, app->renderer.nodes[i].name);
         output(app, "ui (always last)");
@@ -304,7 +311,7 @@ int main(int argc, char **argv)
     ax_log_set_level((AxLogLevel)ax_config_get(&app.config, "log.level")->value);
     if (!ax_event_subscribe(&events, AX_EVENT_CONFIG_CHANGED, config_changed, &app) ||
         !ax_event_subscribe(&events, AX_EVENT_DEVICE_SELECTED, device_selected, NULL)) goto cleanup;
-    const char *names[] = {"core.help", "core.quit", "core.config.save", "core.config.load", "renderer.nodes", "renderer.node.enable",
+    const char *names[] = {"core.help", "core.quit", "core.config.save", "core.config.load", "renderer.nodes", "renderer.node.enable", "renderer.view",
                            "world.speed", "world.altitude", "world.refresh", "world.recenter", "world.planets", "world.visit", "world.carve", "world.build", "world.save", "world.load"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
         if (!ax_command_register(&app.commands, names[i], command, &app)) goto cleanup;

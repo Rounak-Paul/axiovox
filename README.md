@@ -65,12 +65,16 @@ cells stitch neighboring 2:1 detail levels. There is no separate globe/space sce
 Density and material queries remain authoritative; triangle meshes are disposable
 render assets. The former octree ray caster, beam passes and temporary demo are removed.
 
-Moving the camera streams terrain automatically. Workers sample immutable scene
-snapshots, reuse unchanged surface meshes, and publish complete nested LOD layouts
-so neighboring levels stay consistent. Old coverage remains until replacements are
-ready. Independent changed regions build in parallel; serial and parallel output are regression-tested for identical results. Finer regions own their volume, including excavations. The default finest
-region spans 32 m with 64 cells per side (0.5 m spacing); distant levels use coarser
-sampling. Resolution is independent of the precise coordinate addressing system.
+Moving the camera streams terrain automatically. Fixed world chunks split and merge
+according to Euclidean camera-to-chunk distance, with hysteresis to limit churn.
+This works in every direction and on every planet; altitude does not select LOD.
+The bounded octree cut has no overlapping render volumes, and neighbors remain 2:1
+balanced across faces, edges and corners. Each chunk has 16 cells per side; the
+smallest allowed extent is 8 m (0.5 m spacing), subject to the 2,048-leaf budget.
+Workers plan against immutable snapshots, reuse matching meshes, and build changed
+chunks in parallel. Complete layouts publish coherently while old coverage remains
+visible. Queue pressure defers work instead of meshing on the render thread.
+Resolution is independent of the precise coordinate addressing system.
 
 Terrain composes seeded 3D gradient/value noise, normalized fBm, ridged noise,
 cellular fields and domain warping. Terra combines continental basins, plains, hills,
@@ -79,12 +83,11 @@ bowls/rims and rough highlands. Spherical sampling has no latitude/longitude sea
 Temperature, moisture, elevation and slope classify grass, soil, rock, sand and snow.
 These are procedural landforms, not simulated erosion, drainage or ocean fluids.
 
-Generated meshes remove triangles covered by finer regions, then use meshoptimizer
-for attribute-aware simplification and vertex-cache/fetch ordering. A two-cell band
-around active LOD boundaries and material seams remains protected. Simplification
-targets 15% of visible source triangles, constrained by topology and a 0.15-cell
-absolute error metric; complex terrain may retain more triangles. Moving an inner
-boundary invalidates its parent mesh so cached simplification cannot open cracks.
+Generated meshes use meshoptimizer for attribute-aware simplification and
+vertex-cache/fetch ordering. A two-cell band around chunk boundaries and material
+seams remains protected. Simplification targets 15% of source triangles, constrained
+by topology and a 0.15-cell absolute error metric; complex terrain may retain more.
+Fine transition faces match the neighboring coarse contour and normal filter.
 
 Rendering uses indexed triangles, backface culling, infinite reverse-Z depth,
 directional shadow mapping, an atmosphere/space background, and an offscreen world
@@ -104,6 +107,9 @@ camera down or introduce a walking/collision mode. Terra uses 9.81 m/s² and Lun
 1.62 m/s². Visits start at a terrain-aware temperate site with a properly oriented camera.
 
 ```text
+/renderer.view default
+/renderer.view wireframe
+/renderer.view normals
 /world.planets
 /world.visit 2
 /world.carve 3 12
@@ -113,6 +119,9 @@ camera down or introduce a walking/collision mode. Terra uses 9.81 m/s² and Lun
 /world.save "my-scene.axs"
 /world.load "my-scene.axs"
 ```
+
+`renderer.view` without an argument reports the current mode. Wireframe shows visible
+triangle edges with surface depth testing; normals display world-space normal RGB.
 
 `world.visit` is an optional navigation shortcut; flight between bodies requires no
 scene transition. `world.altitude` moves radially above the reference planet's unedited terrain for

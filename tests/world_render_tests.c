@@ -111,6 +111,7 @@ int main(void)
     AxSurfaceRegion bodies[3]={0};
     AxWorldGeometry geometry={0},refined={0};
     int status=EXIT_FAILURE;
+    uint8_t *baseline=NULL;
     AxMeshStats mesh_stats;
     AxPlanetDesc terra={.id=1,.radius=10};
     AxPlanetDesc luna={.id=2,.center={25,0,0},.radius=4,.surface_material=AX_MATERIAL_ROCK};
@@ -147,6 +148,22 @@ int main(void)
     CHECK(moon_x<renderer.extent.width && pixels[moon]+pixels[moon+1]+pixels[moon+2]>90);
     int surface_green=2*pixels[center+1]-pixels[center]-pixels[center+2];
     CHECK(surface_green>30);
+    CHECK(ax_world_renderer_set_view(&world,AX_WORLD_VIEW_NORMALS));
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    CHECK(abs((int)pixels[center+1]-128)<20 && pixels[center]>230);
+    CHECK(ax_world_renderer_set_view(&world,AX_WORLD_VIEW_WIREFRAME));
+    CHECK(ax_world_renderer_set_geometry(&world,&geometry));
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    size_t lines=0,dark=0;
+    for (size_t y=renderer.extent.height/3;y<renderer.extent.height*2/3;++y)
+        for (size_t x=renderer.extent.width/3;x<renderer.extent.width*2/3;++x) {
+            size_t pixel=(y*renderer.extent.width+x)*4;
+            if (pixels[pixel]+pixels[pixel+1]+pixels[pixel+2]>500) ++lines;
+            if (pixels[pixel]+pixels[pixel+1]+pixels[pixel+2]<100) ++dark;
+        }
+    CHECK(lines>100 && dark>100);
+    CHECK(!ax_world_renderer_set_view(&world,(AxWorldView)99) && world.view==AX_WORLD_VIEW_WIREFRAME);
+    CHECK(ax_world_renderer_set_view(&world,AX_WORLD_VIEW_DEFAULT));
     double floor_x=-1.0,floor_y=-2.0,floor_z=sqrt(100-floor_x*floor_x-floor_y*floor_y);
     double distance=40-floor_z;
     size_t shadow_x=(size_t)((floor_x/(distance*tangent*renderer.extent.width/renderer.extent.height)+1)*0.5*renderer.extent.width);
@@ -172,7 +189,7 @@ int main(void)
     CHECK(ax_position_from_meters(&excavation.position,(double[3]){0,0,10}));
     CHECK(ax_scene_edit(&scene,1,&excavation));
     CHECK(ax_position_from_meters(&origin,(double[3]){-4,-4,6}));
-    CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,8,16,true,&bodies[2]));
+    CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,8,16,AX_SURFACE_ALL_FACES,&bodies[2]));
     CHECK(ax_mesh_optimize(&bodies[2].mesh,8,0.5f,NULL,&mesh_stats));
     CHECK(ax_position_from_meters(&origin,(double[3]){-16,-16,-16}));
     CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,32,32,false,&bodies[0]));
@@ -190,10 +207,37 @@ int main(void)
     CHECK(ax_position_from_meters(&world.view_origin,(double[3]){40,0,0}));
     CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
     CHECK(pixels[center]+pixels[center+1]+pixels[center+2]>90);
+    AxSurfaceVertex plane_vertices[4]={0};
+    uint32_t plane_indices[6]={0,1,2,0,2,3};
+    for (size_t i=0;i<4;++i) {
+        float x=(i==1 || i==2) ? 80 : -80,y=i>=2 ? 80 : -80;
+        plane_vertices[i]=(AxSurfaceVertex){.position={x,y,0.5f*x-0.3f*y},.normal={-0.431934f,0.259161f,0.863868f},.color=0xff4c9364};
+    }
+    AxSurfaceRegion plane={.planet=1,.extent=256,.mesh={.vertices=plane_vertices,.indices=plane_indices,.vertex_count=4,.index_count=6}};
+    CHECK(ax_world_geometry_build(&scene,&plane,1,&refined));
+    CHECK(ax_world_renderer_set_geometry(&world,&refined));
+    ax_world_geometry_destroy(&geometry); geometry=refined; refined=(AxWorldGeometry){0}; world.geometry=&geometry;
+    ax_camera_init(&camera,NULL,0,0,NULL);
+    CHECK(ax_position_from_meters(&world.view_origin,(double[3]){0,0,40}));
+    world.shadows_enabled=false;
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    size_t bytes=(size_t)renderer.extent.width*renderer.extent.height*4;
+    baseline=malloc(bytes); CHECK(baseline); memcpy(baseline,pixels,bytes);
+    world.shadows_enabled=true;
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    size_t acne=0;
+    for (size_t y=renderer.extent.height/3;y<renderer.extent.height*2/3;++y)
+        for (size_t x=renderer.extent.width/3;x<renderer.extent.width*2/3;++x) {
+            size_t pixel=(y*renderer.extent.width+x)*4;
+            for (size_t c=0;c<3;++c) if (abs((int)pixels[pixel+c]-baseline[pixel+c])>3) { ++acne; break; }
+        }
+    CHECK(acne==0);
     destroy_capture(&capture);
+    CHECK(ax_world_renderer_set_view(&world,AX_WORLD_VIEW_WIREFRAME));
     CHECK(ax_renderer_switch_device(&renderer,-1) && draw(&renderer,3));
     status=EXIT_SUCCESS;
 cleanup:
+    free(baseline);
     if (renderer.device) vkDeviceWaitIdle(renderer.device);
     destroy_capture(&capture);
     ax_world_renderer_destroy(&world);
