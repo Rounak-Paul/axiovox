@@ -79,7 +79,7 @@ void ax_menu_open_pause(AxMenu *menu)
 bool ax_menu_open_settings(AxMenu *menu)
 {
     if (!menu->config) return false;
-    menu->draft = *menu->config; menu->draft.events = NULL;
+    ax_config_stage(&menu->draft, menu->config);
     for (size_t i = 0; i < AX_CONFIG_SETTING_COUNT; ++i) menu->original_values[i] = menu->config->settings[i].value;
     menu->page = AX_MENU_SETTINGS; menu->category = AX_SETTINGS_INTERFACE;
     menu->focus = 3; menu->pressed_id = -1; menu->scroll = 0; menu->status[0] = 0;
@@ -108,15 +108,12 @@ bool ax_menu_apply(AxMenu *menu)
 {
     if (!menu->config || menu->page != AX_MENU_SETTINGS) return false;
     sync_config(menu);
-    AxConfig validated = *menu->config;
-    validated.events = NULL;
-    if (!ax_config_apply(&validated, &menu->draft)) { snprintf(menu->status, sizeof(menu->status), "Invalid settings."); return false; }
-    if (!menu->settings_path || !ax_config_save(&validated, menu->settings_path)) {
-        snprintf(menu->status, sizeof(menu->status), "Could not save settings. Changes were not applied.");
+    if (!menu->settings_path) { snprintf(menu->status, sizeof(menu->status), "Settings location is unavailable."); return false; }
+    if (!ax_config_apply_saved(menu->config, &menu->draft, menu->settings_path)) {
+        snprintf(menu->status, sizeof(menu->status), "%s", ax_config_error(menu->config));
         return false;
     }
-    if (!ax_config_apply(menu->config, &validated)) return false;
-    menu->draft = *menu->config; menu->draft.events = NULL;
+    ax_config_stage(&menu->draft, menu->config);
     for (size_t i = 0; i < AX_CONFIG_SETTING_COUNT; ++i) menu->original_values[i] = menu->config->settings[i].value;
     snprintf(menu->status, sizeof(menu->status), "%s", menu->config->restart_pending ? "Changes saved. Restart required." : "Changes saved.");
     return true;
@@ -281,7 +278,7 @@ static void field_text(const AxMenu *menu, int index, const char **name, const c
         else snprintf(text, capacity, "%s", levels[value(menu, "ui.scale") - 1]);
     } else if (menu->category == AX_SETTINGS_VIDEO) {
         *name = index ? "Graphics device" : "Window resolution";
-        *description = index ? "Restart required" : "Applies without restarting";
+        *description = index ? "GPU used to render the world" : "Applies without restarting";
         if (!index) snprintf(text, capacity, "%d x %d", value(menu, "window.width"), value(menu, "window.height"));
         else {
             int device = value(menu, "renderer.device"); const char *label = device < 0 ? "Automatic" : "Unavailable device";
@@ -290,7 +287,7 @@ static void field_text(const AxMenu *menu, int index, const char **name, const c
         }
     } else {
         *name = index ? "Log verbosity" : "Worker threads";
-        *description = index ? "Controls diagnostic output" : "Restart required";
+        *description = index ? "Controls diagnostic output" : "Parallel workers for background tasks";
         if (index) snprintf(text, capacity, "%s", logs[value(menu, "log.level")]);
         else snprintf(text, capacity, "%d", value(menu, "jobs.workers"));
     }

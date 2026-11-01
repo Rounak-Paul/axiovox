@@ -1,10 +1,24 @@
 #include "ui.h"
+#include "renderer/memory.h"
 #include <math.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <GLFW/glfw3.h>
+typedef struct {
+    AxFont font;
+    VkImage atlas;
+    VkDeviceMemory atlas_memory;
+    VkImageView atlas_view;
+    VkSampler sampler;
+    VkDescriptorSetLayout descriptor_layout;
+    VkDescriptorPool descriptor_pool;
+    VkDescriptorSet descriptor;
+    VkPipelineLayout pipeline_layout;
+    VkPipeline pipeline;
+    AxBuffer vertices[AX_RENDER_FRAMES];
+} AxUiDevice;
 static const uint32_t vertex_shader[] =
 #include "ui.vert.inc"
 ;
@@ -12,9 +26,8 @@ static const uint32_t fragment_shader[] =
 #include "ui.frag.inc"
 ;
 /** Uploads a baked R8 atlas with explicit transfer/sample transitions. */
-static bool create_atlas(AxUi *ui)
+static bool create_atlas(AxRenderer *r, AxUiDevice *ui)
 {
-    AxRenderer *r = ui->renderer;
     AxBuffer staging = {0};
     VkCommandBuffer command = VK_NULL_HANDLE;
     bool success = false;
@@ -66,9 +79,9 @@ cleanup:
     return success;
 }
 /** Creates the font descriptor and alpha-blended pipeline compatible with dynamic rendering. */
-static bool create_pipeline(AxUi *ui)
+static bool create_pipeline(AxRenderer *r, AxUiDevice *ui)
 {
-    VkDevice device = ui->renderer->device;
+    VkDevice device = r->device;
     VkDescriptorSetLayoutBinding binding = {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT};
     VkDescriptorSetLayoutCreateInfo layout = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &binding};
     if (vkCreateDescriptorSetLayout(device, &layout, NULL, &ui->descriptor_layout) != VK_SUCCESS) return false;
@@ -107,7 +120,7 @@ static bool create_pipeline(AxUi *ui)
     VkPipelineColorBlendStateCreateInfo blend = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &blend_attachment};
     VkDynamicState states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamic = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = states};
-    VkPipelineRenderingCreateInfoKHR rendering = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR, .colorAttachmentCount = 1, .pColorAttachmentFormats = &ui->renderer->format};
+    VkPipelineRenderingCreateInfoKHR rendering = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR, .colorAttachmentCount = 1, .pColorAttachmentFormats = &r->format};
     VkGraphicsPipelineCreateInfo info = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &rendering,
         .stageCount = 2, .pStages = stages, .pVertexInputState = &vertex, .pInputAssemblyState = &assembly, .pViewportState = &viewport,
         .pRasterizationState = &raster, .pMultisampleState = &multisample, .pColorBlendState = &blend, .pDynamicState = &dynamic, .layout = ui->pipeline_layout};
@@ -119,24 +132,53 @@ static bool create_pipeline(AxUi *ui)
 static bool record_ui(const AxRenderFrame *frame, void *user)
 {
     AxUi *ui = user;
+    AxUiDevice *gpu = frame->device_state;
     AxConsole *console = ui->console;
     float scale = ax_hud_scale(&ui->hud);
     float width = frame->extent.width / frame->scale_x / scale, height = frame->extent.height / frame->scale_y / scale;
-    AxUiVertex *vertices = ui->vertices[frame->frame_index].mapped;
-    AxUiCanvas canvas = {.vertices = vertices, .capacity = AX_UI_VERTICES, .font = &ui->font, .width = width, .height = height};
+    AxUiVertex *vertices = gpu->vertices[frame->frame_index].mapped;
+    AxUiCanvas canvas = {.vertices = vertices, .capacity = AX_UI_VERTICES, .font = &gpu->font, .width = width, .height = height};
     ax_hud_draw(&ui->hud, &canvas, console, glfwGetTime());
     VkCommandBuffer command = frame->command;
-    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, ui->pipeline);
+    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, gpu->pipeline);
     VkViewport viewport = {0, 0, (float)frame->extent.width, (float)frame->extent.height, 0, 1};
     VkRect2D scissor = {{0,0}, frame->extent};
     vkCmdSetViewport(command, 0, 1, &viewport);
     vkCmdSetScissor(command, 0, 1, &scissor);
-    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, ui->pipeline_layout, 0, 1, &ui->descriptor, 0, NULL);
+    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, gpu->pipeline_layout, 0, 1, &gpu->descriptor, 0, NULL);
     VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(command, 0, 1, &ui->vertices[frame->frame_index].handle, &offset);
+    vkCmdBindVertexBuffers(command, 0, 1, &gpu->vertices[frame->frame_index].handle, &offset);
     float extent[] = {width, height};
-    vkCmdPushConstants(command, ui->pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(extent), extent);
+    vkCmdPushConstants(command, gpu->pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(extent), extent);
     vkCmdDraw(command, canvas.count, 1, 0, 0);
+    return true;
+}
+/** Releases one device's UI resources, including partially prepared state, without touching logical HUD/menu state. */
+static void destroy_ui_device(AxRenderer *r, void *user, void *state)
+{
+    (void)user;
+    AxUiDevice *gpu = state;
+    if (!gpu) return;
+    for (size_t i = 0; i < AX_RENDER_FRAMES; ++i) ax_buffer_destroy(r, &gpu->vertices[i]);
+    if (gpu->pipeline) vkDestroyPipeline(r->device, gpu->pipeline, NULL);
+    if (gpu->pipeline_layout) vkDestroyPipelineLayout(r->device, gpu->pipeline_layout, NULL);
+    if (gpu->descriptor_pool) vkDestroyDescriptorPool(r->device, gpu->descriptor_pool, NULL);
+    if (gpu->descriptor_layout) vkDestroyDescriptorSetLayout(r->device, gpu->descriptor_layout, NULL);
+    if (gpu->sampler) vkDestroySampler(r->device, gpu->sampler, NULL);
+    if (gpu->atlas_view) vkDestroyImageView(r->device, gpu->atlas_view, NULL);
+    if (gpu->atlas) vkDestroyImage(r->device, gpu->atlas, NULL);
+    if (gpu->atlas_memory) vkFreeMemory(r->device, gpu->atlas_memory, NULL);
+    free(gpu);
+}
+/** Prepares UI GPU resources for an uncommitted renderer device. */
+static bool create_ui_device(AxRenderer *r, void *user, void **state)
+{
+    (void)user;
+    AxUiDevice *gpu = calloc(1, sizeof(*gpu));
+    *state = gpu;
+    if (!gpu || !create_atlas(r, gpu) || !create_pipeline(r, gpu)) return false;
+    for (size_t i = 0; i < AX_RENDER_FRAMES; ++i)
+        if (!ax_buffer_create(r, &gpu->vertices[i], sizeof(AxUiVertex) * AX_UI_VERTICES, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true)) return false;
     return true;
 }
 bool ax_ui_create(AxUi *ui, AxRenderer *r, AxConsole *console)
@@ -144,29 +186,16 @@ bool ax_ui_create(AxUi *ui, AxRenderer *r, AxConsole *console)
     if (!ui || !r || !r->device || !console) return false;
     *ui = (AxUi){.renderer = r, .console = console};
     if (!ax_hud_configure(&ui->hud, 2, 3)) return false;
-    if (!create_atlas(ui) || !create_pipeline(ui)) goto fail;
-    for (size_t i = 0; i < AX_RENDER_FRAMES; ++i)
-        if (!ax_buffer_create(r, &ui->vertices[i], sizeof(AxUiVertex) * AX_UI_VERTICES, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true)) goto fail;
-    if (!ax_renderer_set_ui(r, record_ui, ui)) goto fail;
-    return true;
-fail:
-    ax_ui_destroy(ui);
+    AxRenderNode node = {.name = "ui", .record = record_ui, .user = ui, .enabled = true,
+        .create_device = create_ui_device, .destroy_device = destroy_ui_device};
+    if (ax_renderer_register_ui(r, &node)) return true;
+    *ui = (AxUi){0};
     return false;
 }
 void ax_ui_destroy(AxUi *ui)
 {
     if (!ui || !ui->renderer) return;
-    AxRenderer *r = ui->renderer;
-    if (r->ui_node.user == ui) r->ui_node = (AxRenderNode){0};
-    for (size_t i = 0; i < AX_RENDER_FRAMES; ++i) ax_buffer_destroy(r, &ui->vertices[i]);
-    if (ui->pipeline) vkDestroyPipeline(r->device, ui->pipeline, NULL);
-    if (ui->pipeline_layout) vkDestroyPipelineLayout(r->device, ui->pipeline_layout, NULL);
-    if (ui->descriptor_pool) vkDestroyDescriptorPool(r->device, ui->descriptor_pool, NULL);
-    if (ui->descriptor_layout) vkDestroyDescriptorSetLayout(r->device, ui->descriptor_layout, NULL);
-    if (ui->sampler) vkDestroySampler(r->device, ui->sampler, NULL);
-    if (ui->atlas_view) vkDestroyImageView(r->device, ui->atlas_view, NULL);
-    if (ui->atlas) vkDestroyImage(r->device, ui->atlas, NULL);
-    if (ui->atlas_memory) vkFreeMemory(r->device, ui->atlas_memory, NULL);
+    ax_renderer_clear_ui(ui->renderer, ui);
     *ui = (AxUi){0};
 }
 

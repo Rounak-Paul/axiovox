@@ -78,6 +78,9 @@ add_library(axiovox_ui STATIC src/ui/ui.c "${generated_dir}/ui.vert.inc" "${gene
 target_include_directories(axiovox_ui PRIVATE "${generated_dir}")
 target_link_libraries(axiovox_ui PUBLIC axiovox_renderer axiovox_ui_layout)
 
+add_library(axiovox_runtime STATIC src/app/runtime.c)
+target_link_libraries(axiovox_runtime PUBLIC axiovox_renderer)
+
 add_executable(axiovox src/main.c)
 set_target_properties(axiovox PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<1:${AXIOVOX_OUTPUT_DIRECTORY}>"
@@ -92,16 +95,16 @@ elseif(MINGW)
 endif()
 add_dependencies(axiovox axiovox_distribution)
 
-set_target_properties(axiovox axiovox_core axiovox_console axiovox_platform axiovox_renderer axiovox_ui axiovox_ui_layout PROPERTIES
+set_target_properties(axiovox axiovox_core axiovox_console axiovox_platform axiovox_renderer axiovox_ui axiovox_ui_layout axiovox_runtime PROPERTIES
     C_STANDARD 17
     C_STANDARD_REQUIRED YES
     C_EXTENSIONS NO
 )
 
 target_link_libraries(axiovox_renderer PRIVATE GPUOpen::VulkanMemoryAllocator)
-target_link_libraries(axiovox PRIVATE axiovox_ui)
+target_link_libraries(axiovox PRIVATE axiovox_ui axiovox_runtime)
 
-foreach(target IN ITEMS axiovox axiovox_core axiovox_console axiovox_platform axiovox_renderer axiovox_ui axiovox_ui_layout axiovox_font)
+foreach(target IN ITEMS axiovox axiovox_core axiovox_console axiovox_platform axiovox_renderer axiovox_ui axiovox_ui_layout axiovox_font axiovox_runtime)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4)
     elseif(CMAKE_C_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
@@ -137,10 +140,15 @@ if(BUILD_TESTING)
     add_executable(axiovox_renderer_tests tests/renderer_tests.c)
     target_link_libraries(axiovox_renderer_tests PRIVATE axiovox_renderer)
     set_target_properties(axiovox_renderer_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    add_executable(axiovox_runtime_tests tests/runtime_tests.c)
+    target_link_libraries(axiovox_runtime_tests PRIVATE axiovox_ui axiovox_runtime)
+    set_target_properties(axiovox_runtime_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
     option(AXIOVOX_TEST_GPU "Enable tests requiring a display and Vulkan GPU" OFF)
     if(AXIOVOX_TEST_GPU)
         add_test(NAME renderer COMMAND axiovox_renderer_tests)
         add_test(NAME presentation COMMAND axiovox --smoke-test)
-        set_tests_properties(renderer presentation PROPERTIES TIMEOUT 30)
+        add_test(NAME runtime COMMAND axiovox_runtime_tests)
+        add_test(NAME live_presentation COMMAND axiovox --smoke-test --command "jobs.workers 2" --command "renderer.device 0" --command "renderer.device -1")
+        set_tests_properties(renderer presentation runtime live_presentation PROPERTIES TIMEOUT 30)
     endif()
 endif()

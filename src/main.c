@@ -1,3 +1,4 @@
+#include "app/runtime.h"
 #include "core/command.h"
 #include "core/config.h"
 #include "core/jobs.h"
@@ -17,6 +18,8 @@ typedef struct {
     AxCommands commands;
     AxRenderer renderer;
     AxUi ui;
+    AxJobs *jobs;
+    AxRuntime runtime;
     char settings_path[AX_PATH_CAPACITY];
 } Application;
 /** Applies validated global scale and hotbar rows to the current HUD. */
@@ -25,7 +28,7 @@ static bool configure_hud(Application *app)
     return ax_hud_configure(&app->ui.hud, ax_config_get(&app->config, "ui.scale")->value,
                             ax_config_get(&app->config, "ui.hotbar.rows")->value);
 }
-/** Applies live settings; restart-only settings remain pending until the next launch. */
+/** Applies presentation/logging side effects after the runtime transaction has committed. */
 static void config_changed(const AxEvent *event, void *user)
 {
     Application *app = user;
@@ -57,7 +60,10 @@ static bool command(int argc, const char *const *argv, void *user)
     Application *app = user;
     const AxSetting *setting = ax_config_get(&app->config, argv[0]);
     if (setting) {
-        if (argc == 2 && !ax_config_set(&app->config, argv[0], argv[1])) return false;
+        if (argc == 2 && !ax_config_set(&app->config, argv[0], argv[1])) {
+            if (ax_config_error(&app->config)[0]) output(app, ax_config_error(&app->config));
+            return false;
+        }
         if (argc != 1 && argc != 2) return false;
         char result[256];
         snprintf(result, sizeof(result), "%s = %d%s", setting->key, setting->value,
@@ -92,7 +98,6 @@ int main(int argc, char **argv)
 {
     AxEvents events = {0};
     Application app = {0};
-    AxJobs *jobs = NULL;
     int status = EXIT_FAILURE;
     bool smoke = false, custom_config = false;
     ax_config_init(&app.config, &events);
@@ -119,8 +124,8 @@ int main(int argc, char **argv)
         if (!ax_command_register(&app.commands, app.config.settings[i].key, command, &app)) goto cleanup;
     app.input.events = &events;
     if (!ax_console_init(&app.console, &app.commands, &app.input, &events)) goto cleanup;
-    jobs = ax_jobs_create((size_t)ax_config_get(&app.config, "jobs.workers")->value);
-    if (!jobs) { ax_log(AX_LOG_ERROR, "Worker pool creation failed"); goto cleanup; }
+    app.jobs = ax_jobs_create((size_t)ax_config_get(&app.config, "jobs.workers")->value);
+    if (!app.jobs) { ax_log(AX_LOG_ERROR, "Worker pool creation failed"); goto cleanup; }
     if (!ax_window_create(&app.window, &events, ax_config_get(&app.config, "window.width")->value, ax_config_get(&app.config, "window.height")->value)) goto cleanup;
     ax_window_set_input(&app.window, &app.input);
     if (!ax_renderer_create(&app.renderer, &app.window, &events, ax_config_get(&app.config, "renderer.device")->value)) goto cleanup;
@@ -128,6 +133,7 @@ int main(int argc, char **argv)
     if (!configure_hud(&app)) goto cleanup;
     ax_ui_bind_settings(&app.ui, &app.config, app.settings_path);
     ax_config_mark_applied(&app.config);
+    if (!ax_runtime_bind(&app.runtime, &app.config, &app.renderer, app.jobs)) goto cleanup;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--config")) ++i;
         else if (!strcmp(argv[i], "--command")) {
@@ -147,6 +153,7 @@ int main(int argc, char **argv)
         if (smoke && frames == 4) ax_menu_open_settings(&app.ui.hud.menu);
         if (smoke && frames == 6) app.ui.hud.menu.category = AX_SETTINGS_VIDEO;
         ax_ui_update(&app.ui, glfwGetTime());
+        if (!app.runtime.healthy) { ax_log(AX_LOG_ERROR, "Runtime rollback failed"); goto cleanup; }
         if (!ax_renderer_draw(&app.renderer)) { ax_log(AX_LOG_ERROR, "Frame rendering failed"); goto cleanup; }
         if (smoke && ++frames == 8) break;
         int width, height;
@@ -155,7 +162,7 @@ int main(int argc, char **argv)
     }
     status = EXIT_SUCCESS;
 cleanup:
-    ax_jobs_destroy(jobs);
+    ax_jobs_destroy(app.jobs);
     if (app.renderer.device) vkDeviceWaitIdle(app.renderer.device);
     ax_ui_destroy(&app.ui);
     ax_renderer_destroy(&app.renderer);

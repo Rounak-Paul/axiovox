@@ -6,6 +6,8 @@ User requested a full pause menu with game name and settings resembling normal
 voxel/factory games. Implemented. Prior preference preserved: no generic keyboard
 instruction captions. No commits, pushes, or index changes.
 
+Device/worker live changes now supersede restart-only handling below: see live-device-workers.md.
+
 ## Architecture
 
 - `ui/menu.*`: GPU-independent menu state, hit tests, keyboard navigation, clipped

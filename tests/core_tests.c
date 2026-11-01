@@ -32,7 +32,7 @@ int main(void)
     CHECK(count == 1);
     CHECK(!ax_command_execute(&commands, "unknown"));
     CHECK(ax_config_set(&config, "renderer.device", "0"));
-    CHECK(config.restart_pending);
+    CHECK(!config.restart_pending);
     CHECK(ax_config_save(&config, "core-test.cfg"));
     CHECK(ax_config_set(&config, "window.width", "800"));
     CHECK(ax_config_load(&config, "core-test.cfg"));
@@ -68,6 +68,22 @@ int main(void)
     for (int i = 0; i < 1000; ++i) {
         if (!ax_jobs_submit(jobs, increment, &completed)) { ax_jobs_wait(jobs); --i; }
     }
+    CHECK(ax_jobs_resize(jobs, 2));
+    CHECK(ax_jobs_worker_count(jobs) == 2);
+    CHECK(ax_jobs_resize(jobs, 8));
+    CHECK(ax_jobs_worker_count(jobs) == 8);
+    CHECK(!ax_jobs_resize(jobs, 0));
+    CHECK(!ax_jobs_resize(jobs, 65));
+    AxJobsChange *change = NULL, *second = NULL;
+    CHECK(ax_jobs_prepare_resize(jobs, 12, &change));
+    CHECK(ax_jobs_worker_count(jobs) == 8);
+    CHECK(!ax_jobs_prepare_resize(jobs, 1, &second));
+    ax_jobs_finish_resize(change, false);
+    CHECK(ax_jobs_worker_count(jobs) == 8);
+    CHECK(ax_jobs_prepare_resize(jobs, 1, &change));
+    CHECK(ax_jobs_worker_count(jobs) == 8);
+    ax_jobs_finish_resize(change, true);
+    CHECK(ax_jobs_worker_count(jobs) == 1);
     ax_jobs_wait(jobs);
     CHECK(atomic_load(&completed) == 1000);
     for (int i = 0; i < 100; ++i) CHECK(ax_jobs_submit(jobs, increment, &completed));

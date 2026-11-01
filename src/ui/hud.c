@@ -88,10 +88,11 @@ void ax_hud_update(AxHud *hud, AxInput *input, AxConsole *console, double time, 
 static void hotbar(const AxHud *hud, AxUiCanvas *canvas, float margin)
 {
     if (canvas->width < 240 || canvas->height < 140) return;
-    float slot = floorf(fminf(26, (canvas->width - 2 * margin - 10 - 16) / 9));
+    float available = canvas->width - 2 * (margin + 72);
+    float slot = floorf(fminf(26, (available - 26) / 9));
+    if (slot < 6) return;
     float width = slot * 9 + 16 + 10, x = floorf((canvas->width - width) / 2);
-    float y = canvas->height - margin - slot - 16;
-    if (x < margin + 72) y -= 36;
+    float y = canvas->height - margin - 28;
     ax_ui_panel(canvas, x, y, width, slot + 10, ink, border);
     for (unsigned i = 0; i < 9; ++i) {
         float sx = x + 5 + (float)i * (slot + 2);

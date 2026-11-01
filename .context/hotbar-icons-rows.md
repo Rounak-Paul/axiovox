@@ -32,3 +32,5 @@ ui.hotbar.rows=9. bin/axiovox is the only game executable. git diff --check pass
 Windows/Linux execution and native mouse/keyboard UI interaction remain unverified.
 
 Full pause/settings UI and preferences now supersede the simple pause status: see pause-settings-menu.md.
+
+Hotbar alignment now stays level with icons on narrow viewports too: see live-device-workers.md.

@@ -92,9 +92,9 @@ Settings are grouped into Interface (UI scale/hotbar rows), Video (window resolu
 and detected compatible graphics devices), and System (worker threads/log verbosity).
 Edits are staged: **Apply** saves and applies them, **Done** saves and returns, and
 **Cancel** discards pending edits. **Reset all** restores defaults in the draft.
-Interface/window/log changes apply without restart. GPU and worker-count changes
-are marked as requiring restart, with pending status cleared if reverted to the
-startup-applied value. Runtime command changes are merged into untouched form fields.
+All current settings apply live. GPU changes rebuild the logical device and
+node-owned graphics resources while preserving console, menu, and HUD state.
+Worker changes resize the existing pool without losing accepted jobs. Runtime command changes are merged into untouched form fields.
 
 Settings are written atomically and loaded at the next launch:
 
@@ -141,7 +141,7 @@ no shell expansion. Commands are bounded to 16 arguments and 1023 bytes.
 Settings: `window.width`, `window.height`, `renderer.device`, `jobs.workers`,
 `log.level` (0 debug through 3 error), `ui.scale`, and `ui.hotbar.rows`. A setting with no value reads its current
 value; one value writes it after validation. Width/height/log level apply live.
-Device and worker count changes mark restart pending and take effect on next launch.
+Device and worker count changes take effect without restarting the game.
 Device `-1` auto-selects; other indices refer to the current GPU enumeration and
 are not stable hardware identifiers. Unavailable explicit selections fail startup.
 
@@ -156,12 +156,37 @@ before emitting change events.
 Config files load before initialization. Repeatable `--command` arguments execute
 after initialization using the same dispatch as the interactive console.
 
+## Live service changes
+
+Commands, menu Apply, and config-file loading share one transaction path. New
+workers are reserved on standby, and the candidate GPU's queues, synchronization,
+font atlas, pipelines, buffers, and render-node states are prepared before replacing
+the running services. Presentation changes happen outside command recording, with
+the old GPU idle. The old device resources remain available until the save succeeds.
+Preparation, activation, or save failures cancel the change and restore the prior
+runtime. An unrecoverable device/rollback failure stops rendering and exits cleanly.
+
+The job-pool handle remains stable across changes. Shrinking lets retiring workers
+finish their current jobs; remaining workers continue the same accepted queue.
+A short pause while joining retiring workers or rebuilding graphics is expected.
+
+Render nodes with GPU resources register `create_device`/`destroy_device` hooks and
+receive their current device state through `AxRenderFrame.device_state`. CPU-owned
+scene data belongs in the persistent `user` object. Prepare callbacks must not
+mutate live GPU state or retain temporary renderer pointers; destruction must accept
+NULL/partial states. Nodes registered without hooks must be CPU-only. UI uses this
+same lifecycle, and the final UI node still records last.
+
+The hotbar and bottom-left buttons share a top edge at every drawable size. On
+narrow viewports, the centered hotbar shrinks to keep clear of the icon strip.
+
 ## Architecture
 
 - `core/`: synchronous typed events, logger, config, command registry, jobs, input,
   and GLFW window management. Input separates physical keys and Unicode text;
   focus loss releases held keys/buttons. Mouse position, button state, and scroll
   are available. Raw state is available to UI; gameplay queries honor capture.
+- `app/runtime.*`: stages, activates, finalizes, and rolls back live service changes.
 - `renderer/`: compatible GPU enumeration/ranking, device/surface/swapchain,
   two frames in flight, explicit image transitions, resize/out-of-date recreation,
   and dynamic rendering without render passes or framebuffers. Discrete GPUs rank

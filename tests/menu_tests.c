@@ -17,7 +17,7 @@ static AxMenuAction key(AxMenu *menu, AxInput *input, AxKey key)
 }
 /** Verifies that failed serialization never replaces a previously saved file. */
 static bool fail_write(FILE *file, const void *user) { (void)user; fputs("partial write", file); return false; }
-/** Exercises click release, drafts, persistence, restart status, GPU filtering, reset/cancel, and quit dispatch. */
+/** Exercises click release, drafts, persistence, live-setting metadata, GPU filtering, reset/cancel, and quit dispatch. */
 int main(void)
 {
     AxEvents events = {0}; AxConfig config; ax_config_init(&config, &events);
@@ -66,7 +66,7 @@ int main(void)
     key(&menu, &input, AX_KEY_RIGHT);
     CHECK(ax_config_get(&menu.draft, "renderer.device")->value == -1);
     key(&menu, &input, AX_KEY_LEFT);
-    CHECK(ax_menu_apply(&menu) && config.restart_pending);
+    CHECK(ax_menu_apply(&menu) && !config.restart_pending);
     key(&menu, &input, AX_KEY_RIGHT);
     CHECK(ax_menu_apply(&menu) && !config.restart_pending);
     menu.focus = 3;
@@ -77,7 +77,7 @@ int main(void)
     CHECK(ax_menu_apply(&menu));
     menu.category = AX_SETTINGS_SYSTEM; menu.focus = 3;
     key(&menu, &input, AX_KEY_RIGHT);
-    CHECK(ax_menu_apply(&menu) && config.restart_pending);
+    CHECK(ax_menu_apply(&menu) && !config.restart_pending);
     key(&menu, &input, AX_KEY_LEFT);
     CHECK(ax_menu_apply(&menu) && !config.restart_pending);
     menu.category = AX_SETTINGS_INTERFACE; menu.focus = 3;
