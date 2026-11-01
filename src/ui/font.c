@@ -8,7 +8,7 @@ bool ax_font_bake(AxFont *font, unsigned char *pixels)
 {
     if (!font || !pixels || !ax_font_size) return false;
     stbtt_bakedchar baked[AX_FONT_COUNT];
-    if (stbtt_BakeFontBitmap(ax_font_data, 0, 32.0f, pixels, AX_FONT_ATLAS, AX_FONT_ATLAS, AX_FONT_FIRST, AX_FONT_COUNT, baked) <= 0) return false;
+    if (stbtt_BakeFontBitmap(ax_font_data, 0, AX_FONT_BAKED_PIXELS, pixels, AX_FONT_ATLAS, AX_FONT_ATLAS, AX_FONT_FIRST, AX_FONT_COUNT, baked) <= 0) return false;
     for (size_t i = 0; i < AX_FONT_COUNT; ++i) {
         const stbtt_bakedchar *g = &baked[i];
         font->glyphs[i] = (AxGlyph){g->xoff, g->yoff, g->xoff + g->x1 - g->x0, g->yoff + g->y1 - g->y0,

@@ -1,8 +1,10 @@
-RobotoMonoNerdFont-Regular.ttf was extracted unchanged from Causality's
-causality/src/renderer/embedded_font.c in the Causality source repository.
-The font copyright and license metadata are preserved in LICENSE.txt, together
-with the full Apache 2.0 license and Nerd Fonts license distribution.
+DepartureMonoNerdFontMono-Regular.otf is the unmodified Mono variant from the
+user-supplied DepartureMono Nerd Fonts download (Nerd Fonts 3.4.0, Departure Mono
+1.422). It is the game's default UI and console font.
 
-Only ASCII/Latin-1 glyphs are baked at runtime. stb_truetype's original license
-is retained in vendors/stb/stb_truetype.h. The application embeds the original
-font bytes at build time, requiring no external font file during execution.
+The downloaded font license is preserved in LICENSE.txt. Additional Nerd Fonts
+licensing is retained in LICENSE-NERD-FONTS.txt.
+
+The build embeds these original OTF bytes into the game and copies the font and
+licenses to bin/assets/fonts/. The renderer bakes ASCII/Latin-1 glyphs into an R8
+atlas using stb_truetype. No installed font or external runtime font path is needed.

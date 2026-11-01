@@ -20,7 +20,8 @@ typedef enum {
 typedef struct {
     AxEvents *events;
     bool down[AX_KEY_COUNT], pressed[AX_KEY_COUNT], released[AX_KEY_COUNT];
-    bool mouse_down[8], captured;
+    bool consumed[AX_KEY_COUNT];
+    bool mouse_down[8], mouse_pressed[8], mouse_released[8], captured;
     double mouse_x, mouse_y, scroll_x, scroll_y;
 } AxInput;
 /** Resets per-frame transitions before polling OS events. Owner-thread only. */
@@ -39,3 +40,6 @@ bool ax_input_pressed(const AxInput *input, AxKey key);
 bool ax_input_released(const AxInput *input, AxKey key);
 /** Returns a pointer button's gameplay held state, suppressed while UI captures input. */
 bool ax_input_mouse_down(const AxInput *input, unsigned button);
+
+/** Updates pointer-button transitions; consumed by UI before gameplay queries. */
+void ax_input_mouse_button(AxInput *input, unsigned button, bool pressed);

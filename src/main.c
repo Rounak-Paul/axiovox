@@ -17,6 +17,12 @@ typedef struct {
     AxRenderer renderer;
     AxUi ui;
 } Application;
+/** Applies validated global scale and hotbar rows to the current HUD. */
+static bool configure_hud(Application *app)
+{
+    return ax_hud_configure(&app->ui.hud, ax_config_get(&app->config, "ui.scale")->value,
+                            ax_config_get(&app->config, "ui.hotbar.rows")->value);
+}
 /** Applies live settings; restart-only settings remain pending until the next launch. */
 static void config_changed(const AxEvent *event, void *user)
 {
@@ -25,7 +31,9 @@ static void config_changed(const AxEvent *event, void *user)
         ax_log(AX_LOG_INFO, "%s changed; restart required", event->data.config.key);
     } else if (!strcmp(event->data.config.key, "log.level")) {
         ax_log_set_level((AxLogLevel)ax_config_get(&app->config, "log.level")->value);
-    } else if (app->window.handle) {
+    } else if (!strncmp(event->data.config.key, "ui.", 3)) {
+        if (!configure_hud(app)) ax_log(AX_LOG_ERROR, "Invalid HUD configuration");
+    } else if (app->window.handle && (!strcmp(event->data.config.key, "window.width") || !strcmp(event->data.config.key, "window.height"))) {
         glfwSetWindowSize(app->window.handle, ax_config_get(&app->config, "window.width")->value, ax_config_get(&app->config, "window.height")->value);
     }
 }
@@ -110,6 +118,7 @@ int main(int argc, char **argv)
     ax_window_set_input(&app.window, &app.input);
     if (!ax_renderer_create(&app.renderer, &app.window, &events, ax_config_get(&app.config, "renderer.device")->value)) goto cleanup;
     if (!ax_ui_create(&app.ui, &app.renderer, &app.console)) { ax_log(AX_LOG_ERROR, "UI initialization failed"); goto cleanup; }
+    if (!configure_hud(&app)) goto cleanup;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--config")) ++i;
         else if (!strcmp(argv[i], "--command")) {
@@ -121,6 +130,7 @@ int main(int argc, char **argv)
     while (!glfwWindowShouldClose(app.window.handle)) {
         ax_input_begin_frame(&app.input);
         glfwPollEvents();
+        ax_ui_update(&app.ui, glfwGetTime());
         if (!ax_renderer_draw(&app.renderer)) { ax_log(AX_LOG_ERROR, "Frame rendering failed"); goto cleanup; }
         if (smoke && ++frames == 8) break;
         int width, height;

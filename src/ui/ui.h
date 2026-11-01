@@ -1,13 +1,13 @@
 #pragma once
 #include "console.h"
-#include "font.h"
+#include "hud.h"
 #include "renderer/memory.h"
 #define AX_UI_VERTICES 65536
-typedef struct { float x, y, u, v, r, g, b, a; } AxUiVertex;
 typedef struct {
     AxRenderer *renderer;
     AxConsole *console;
     AxFont font;
+    AxHud hud;
     VkImage atlas;
     VkDeviceMemory atlas_memory;
     VkImageView atlas_view;
@@ -23,3 +23,6 @@ typedef struct {
 bool ax_ui_create(AxUi *ui, AxRenderer *renderer, AxConsole *console);
 /** Destroys UI resources after the renderer is idle and before renderer destruction. */
 void ax_ui_destroy(AxUi *ui);
+
+/** Updates HUD input and feedback before recording a frame; owner-thread only. */
+void ax_ui_update(AxUi *ui, double time);

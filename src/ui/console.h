@@ -8,12 +8,15 @@ typedef struct {
     AxInput *input;
     AxEvents *events;
     uint64_t key_subscription, text_subscription;
-    bool open;
+    bool open, opening_key_text;
     char line[AX_COMMAND_TEXT], draft[AX_COMMAND_TEXT];
     size_t cursor, length, history_count, history_position;
     char history[AX_CONSOLE_HISTORY][AX_COMMAND_TEXT];
     char output[AX_CONSOLE_LINES][AX_COMMAND_TEXT];
     size_t output_count;
+    uint64_t output_revision;
+    const AxCommand *suggestions[AX_COMMAND_LIMIT];
+    size_t suggestion_count, selected_suggestion;
 } AxConsole;
 /** Subscribes keyboard/text handlers; all console operations are owner-thread only. */
 bool ax_console_init(AxConsole *console, AxCommands *commands, AxInput *input, AxEvents *events);

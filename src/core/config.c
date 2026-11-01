@@ -11,12 +11,14 @@ void ax_config_init(AxConfig *config, AxEvents *events)
         {"window.height", 720, 64, 16384, false},
         {"renderer.device", -1, -1, 65535, true},
         {"jobs.workers", 4, 1, 64, true},
-        {"log.level", AX_LOG_INFO, AX_LOG_DEBUG, AX_LOG_ERROR, false}}, .events = events};
+        {"log.level", AX_LOG_INFO, AX_LOG_DEBUG, AX_LOG_ERROR, false},
+        {"ui.scale", 2, 1, 5, false},
+        {"ui.hotbar.rows", 3, 1, 9, false}}, .events = events};
 }
 const AxSetting *ax_config_get(const AxConfig *config, const char *key)
 {
     if (!config || !key) return NULL;
-    for (size_t i = 0; i < 5; ++i) if (!strcmp(config->settings[i].key, key)) return &config->settings[i];
+    for (size_t i = 0; i < AX_CONFIG_SETTING_COUNT; ++i) if (!strcmp(config->settings[i].key, key)) return &config->settings[i];
     return NULL;
 }
 bool ax_config_set(AxConfig *config, const char *key, const char *value)
@@ -62,7 +64,7 @@ bool ax_config_load(AxConfig *config, const char *path)
     AxConfig previous = *config;
     staged.events = config->events;
     *config = staged;
-    for (size_t i = 0; i < 5; ++i) if (previous.settings[i].value != config->settings[i].value) {
+    for (size_t i = 0; i < AX_CONFIG_SETTING_COUNT; ++i) if (previous.settings[i].value != config->settings[i].value) {
         char value[32];
         snprintf(value, sizeof(value), "%d", config->settings[i].value);
         AxEvent event = {.type = AX_EVENT_CONFIG_CHANGED, .data.config = {config->settings[i].key, value, config->settings[i].restart_required}};
@@ -76,7 +78,7 @@ bool ax_config_save(const AxConfig *config, const char *path)
     FILE *file = fopen(path, "w");
     if (!file) return false;
     bool ok = true;
-    for (size_t i = 0; i < 5; ++i) if (fprintf(file, "%s=%d\n", config->settings[i].key, config->settings[i].value) < 0) ok = false;
+    for (size_t i = 0; i < AX_CONFIG_SETTING_COUNT; ++i) if (fprintf(file, "%s=%d\n", config->settings[i].key, config->settings[i].value) < 0) ok = false;
     if (fclose(file)) ok = false;
     return ok;
 }

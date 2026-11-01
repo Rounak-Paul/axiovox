@@ -2,7 +2,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-typedef enum { AX_EVENT_WINDOW_CLOSE, AX_EVENT_WINDOW_RESIZE, AX_EVENT_DEVICE_SELECTED, AX_EVENT_CONFIG_CHANGED, AX_EVENT_KEY, AX_EVENT_TEXT, AX_EVENT_FOCUS } AxEventType;
+typedef enum { AX_EVENT_WINDOW_CLOSE, AX_EVENT_WINDOW_RESIZE, AX_EVENT_DEVICE_SELECTED, AX_EVENT_CONFIG_CHANGED, AX_EVENT_KEY, AX_EVENT_TEXT, AX_EVENT_FOCUS, AX_EVENT_PAUSE_CHANGED } AxEventType;
 typedef struct {
     AxEventType type;
     union {
@@ -10,6 +10,7 @@ typedef struct {
         struct { int key, modifiers; bool pressed, repeat; } key;
         struct { uint32_t codepoint; } text;
         struct { bool focused; } focus;
+        struct { bool paused; } pause;
         struct { uint32_t index; const char *name; } device;
         struct { const char *key, *value; bool restart_required; } config;
     } data;

@@ -1,7 +1,8 @@
 #pragma once
 #include "event.h"
 typedef struct { const char *key; int value, minimum, maximum; bool restart_required; } AxSetting;
-typedef struct { AxSetting settings[5]; AxEvents *events; bool restart_pending; } AxConfig;
+#define AX_CONFIG_SETTING_COUNT 7
+typedef struct { AxSetting settings[AX_CONFIG_SETTING_COUNT]; AxEvents *events; bool restart_pending; } AxConfig;
 /** Initializes known settings and their validation bounds. Owner-thread access only. */
 void ax_config_init(AxConfig *config, AxEvents *events);
 /** Gets a registered setting, or NULL for an unknown key. */

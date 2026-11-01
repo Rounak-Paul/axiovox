@@ -56,12 +56,43 @@ Custom SDK layouts can set `AXIOVOX_MOLTENVK_LIBRARY` (macOS) or
 `AXIOVOX_VULKAN_LOADER` (Windows) to the matching runtime library at configure time.
 `bin/` is generated and ignored by Git.
 
+## Game HUD
+
+The voxel-world HUD has a center crosshair, a compact nine-slot hotbar, and two
+icon-only bottom-left buttons: `/` opens commands and pause toggles the pause state.
+Escape also toggles pause outside the console. Pause emits `AX_EVENT_PAUSE_CHANGED`
+for future simulation systems; rendering continues. No keyboard-help captions or
+wordmark are drawn.
+
+Hotbar rows are empty scaffolding until inventory is added. 1–9 or the mouse wheel
+selects a slot. Tab cycles rows; Shift+Tab cycles backwards. Each row remembers its
+selection. Console and pause capture prevent hotbar actions, so Tab retains console
+completion behavior while typing. Small markers indicate the active hotbar row.
+
+`ui.hotbar.rows` sets 1–9 rows (default 3). `ui.scale` applies globally to text,
+panels, icons, hit targets, crosshair, and hotbar: levels 1–5 correspond to 0.75x,
+1x, 1.25x, 1.5x, and 2x. Default is level 2. Both settings apply live and are saved
+with the other configuration values. The hotbar has no separate size setting.
+
+```text
+/ui.scale 3
+/ui.hotbar.rows 4
+```
+
 ## Console and runtime commands
 
-Press `/` to open the console, Enter to execute, Escape to close. Arrow keys,
-Home/End, Backspace/Delete edit the line; Up/Down recall history; Tab completes a
-unique name or lists candidates. Console capture suppresses gameplay input queries.
-Recent command output remains visible when the console closes.
+Press `/` to open the console with all commands listed alphabetically. Typing
+filters the list. Up/Down moves the highlighted suggestion and wraps at either end;
+the list scrolls to keep selection visible. Tab accepts the highlighted name and
+adds a space for values; Shift+Tab selects the previous match. Enter completes a
+partial/selected name first, then executes a completed command. An exact typed
+command can execute immediately. Completion preserves existing values when editing
+the command name.
+
+Left/Right, Home/End, and Backspace/Delete edit the UTF-8 line. Alt+Up/Down recalls
+history; plain Up/Down recalls history when no suggestions are shown, such as while
+entering values. Escape closes the console. Console capture suppresses gameplay
+input queries. Recent command output fades after eight seconds when the console closes.
 
 Commands use `namespace.name [values...]`. Names have nonempty identifier segments
 separated by dots. Quotes and backslash escapes support spaces in values; there is
@@ -81,7 +112,7 @@ no shell expansion. Commands are bounded to 16 arguments and 1023 bytes.
 ```
 
 Settings: `window.width`, `window.height`, `renderer.device`, `jobs.workers`,
-`log.level` (0 debug through 3 error). A setting with no value reads its current
+`log.level` (0 debug through 3 error), `ui.scale`, and `ui.hotbar.rows`. A setting with no value reads its current
 value; one value writes it after validation. Width/height/log level apply live.
 Device and worker count changes mark restart pending and take effect on next launch.
 Device `-1` auto-selects; other indices refer to the current GPU enumeration and
@@ -112,11 +143,13 @@ after initialization using the same dispatch as the interactive console.
   at runtime. Node callbacks borrow frame context and must not change the registry,
   end rendering, or perform transfers/compute requiring another rendering scope.
   This is an ordered node pipeline, not an automatic resource/dependency graph.
-- `ui/`: console state/editor and a separate Vulkan UI node. The R8 font atlas uses
-  the Causality stb_truetype approach and its embedded Roboto Mono Nerd Font, with
+- `ui/`: console state/editor, GPU-independent draw list and HUD layout, and a
+  separate Vulkan UI node. The R8 font atlas uses
+  the Causality stb_truetype approach and embedded Departure Mono Nerd Font Mono, with
   licenses retained under `assets/fonts/`. Atlas glyphs cover ASCII/Latin-1; other
-  Unicode codepoints are preserved in command text and displayed as `?`. Font size
-  is 16 logical pixels, baked at 32 physical pixels for 2x display scaling.
+  Unicode codepoints are preserved in command text and displayed as `?`. Font metrics span
+  14 logical pixels, baked at 28 physical pixels with nearest sampling to preserve
+  Departure Mono's pixel grid at 2x display scaling.
 - `ax_command_invoke` accepts argv directly, independently of parsing or the UI.
   Future Lua bindings can use this dispatch and config validation. No Lua is linked.
 

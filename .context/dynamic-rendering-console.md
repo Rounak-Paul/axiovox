@@ -27,8 +27,10 @@ The validation below describes the original loader-based renderer.
   no automatic resource graph, separate compute/transfer/depth passes yet.
 - Input adapter in window callbacks feeds core key/text/focus events and pointer state.
   Navigation, alphabet, numbers, F1-F12, modifiers supported. Gameplay accessors honor
-  UI capture. Slash OS text opens console once, matching keyboard layout.
+  UI capture. Unmodified physical slash opens the console; matching OS slash text is suppressed
+  once. Text-only slash fallback supports other layouts. See slash-console-input.md.
 - Console: bounded UTF-8 line editing/cursor scrolling, history/draft restoration,
+  live sorted suggestions with keyboard selection (see console-suggestions.md),
   completion, output ring, Enter/Escape. Recent output stays visible while closed.
 - Namespace commands: dotted settings accept zero values=get, one=set. Built-ins
   core.help/core.quit/core.config.save/core.config.load/renderer.nodes/

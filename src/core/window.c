@@ -108,7 +108,7 @@ static void mouse_callback(GLFWwindow *handle, int button, int action, int mods)
 {
     (void)mods;
     AxWindow *window = glfwGetWindowUserPointer(handle);
-    if (button >= 0 && button < 8) window->input->mouse_down[button] = action != GLFW_RELEASE;
+    if (button >= 0) ax_input_mouse_button(window->input, (unsigned)button, action != GLFW_RELEASE);
 }
 /** Accumulates scrolling within a frame. */
 static void scroll_callback(GLFWwindow *handle, double x, double y)

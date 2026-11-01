@@ -48,10 +48,10 @@ endforeach()
 add_custom_command(
     OUTPUT "${generated_dir}/embedded_font.c"
     COMMAND "${CMAKE_COMMAND}"
-            "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/RobotoMonoNerdFont-Regular.ttf"
+            "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/DepartureMonoNerdFontMono-Regular.otf"
             "-DOUTPUT=${generated_dir}/embedded_font.c"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedFont.cmake"
-    DEPENDS assets/fonts/RobotoMonoNerdFont-Regular.ttf cmake/EmbedFont.cmake
+    DEPENDS assets/fonts/DepartureMonoNerdFontMono-Regular.otf cmake/EmbedFont.cmake
     VERBATIM
 )
 add_library(axiovox_font STATIC src/ui/font.c "${generated_dir}/embedded_font.c")
@@ -70,9 +70,12 @@ target_link_libraries(axiovox_platform PUBLIC axiovox_core Vulkan::Headers ${AXI
 add_library(axiovox_renderer STATIC src/renderer/renderer.c src/renderer/frame.c src/renderer/memory.c)
 target_link_libraries(axiovox_renderer PUBLIC axiovox_platform)
 
+add_library(axiovox_ui_layout STATIC src/ui/draw.c src/ui/hud.c)
+target_link_libraries(axiovox_ui_layout PUBLIC axiovox_console axiovox_font)
+
 add_library(axiovox_ui STATIC src/ui/ui.c "${generated_dir}/ui.vert.inc" "${generated_dir}/ui.frag.inc")
 target_include_directories(axiovox_ui PRIVATE "${generated_dir}")
-target_link_libraries(axiovox_ui PUBLIC axiovox_renderer axiovox_console PRIVATE axiovox_font)
+target_link_libraries(axiovox_ui PUBLIC axiovox_renderer axiovox_ui_layout)
 
 add_executable(axiovox src/main.c)
 set_target_properties(axiovox PROPERTIES
@@ -88,7 +91,7 @@ elseif(MINGW)
 endif()
 add_dependencies(axiovox axiovox_distribution)
 
-set_target_properties(axiovox axiovox_core axiovox_console axiovox_platform axiovox_renderer axiovox_ui PROPERTIES
+set_target_properties(axiovox axiovox_core axiovox_console axiovox_platform axiovox_renderer axiovox_ui axiovox_ui_layout PROPERTIES
     C_STANDARD 17
     C_STANDARD_REQUIRED YES
     C_EXTENSIONS NO
@@ -97,7 +100,7 @@ set_target_properties(axiovox axiovox_core axiovox_console axiovox_platform axio
 target_link_libraries(axiovox_renderer PRIVATE GPUOpen::VulkanMemoryAllocator)
 target_link_libraries(axiovox PRIVATE axiovox_ui)
 
-foreach(target IN ITEMS axiovox axiovox_core axiovox_console axiovox_platform axiovox_renderer axiovox_ui axiovox_font)
+foreach(target IN ITEMS axiovox axiovox_core axiovox_console axiovox_platform axiovox_renderer axiovox_ui axiovox_ui_layout axiovox_font)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4)
     elseif(CMAKE_C_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
@@ -117,6 +120,12 @@ if(BUILD_TESTING)
     set_target_properties(axiovox_console_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
     add_test(NAME console COMMAND axiovox_console_tests)
     set_tests_properties(console PROPERTIES TIMEOUT 30)
+
+    add_executable(axiovox_ui_tests tests/ui_tests.c)
+    target_link_libraries(axiovox_ui_tests PRIVATE axiovox_ui_layout)
+    set_target_properties(axiovox_ui_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    add_test(NAME ui COMMAND axiovox_ui_tests)
+    set_tests_properties(ui PROPERTIES TIMEOUT 30)
 
     add_executable(axiovox_renderer_tests tests/renderer_tests.c)
     target_link_libraries(axiovox_renderer_tests PRIVATE axiovox_renderer)

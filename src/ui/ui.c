@@ -1,6 +1,7 @@
 #include "ui.h"
 #include <math.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <GLFW/glfw3.h>
@@ -54,7 +55,7 @@ static bool create_atlas(AxUi *ui)
     VkImageViewCreateInfo view = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = ui->atlas,
         .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8_UNORM, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
     if (vkCreateImageView(r->device, &view, NULL, &ui->atlas_view) != VK_SUCCESS) goto cleanup;
-    VkSamplerCreateInfo sampler = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
+    VkSamplerCreateInfo sampler = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST,
         .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
         .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
     success = vkCreateSampler(r->device, &sampler, NULL, &ui->sampler) == VK_SUCCESS;
@@ -114,69 +115,16 @@ static bool create_pipeline(AxUi *ui)
     vkDestroyShaderModule(device, vert, NULL); vkDestroyShaderModule(device, frag, NULL);
     return result == VK_SUCCESS;
 }
-/** Appends a rectangle or textured glyph as two triangles within the fixed vertex budget. */
-static void quad(AxUiVertex *vertices, uint32_t *count, float x0, float y0, float x1, float y1,
-                 float u0, float v0, float u1, float v1, float red, float green, float blue, float alpha)
-{
-    if (*count > AX_UI_VERTICES - 6) return;
-    AxUiVertex points[] = {{x0,y0,u0,v0,red,green,blue,alpha}, {x1,y0,u1,v0,red,green,blue,alpha}, {x1,y1,u1,v1,red,green,blue,alpha},
-        {x0,y0,u0,v0,red,green,blue,alpha}, {x1,y1,u1,v1,red,green,blue,alpha}, {x0,y1,u0,v1,red,green,blue,alpha}};
-    memcpy(vertices + *count, points, sizeof(points));
-    *count += 6;
-}
-/** Draws one clipped line of UTF-8 text with Latin-1 glyphs and replacement for other codepoints. */
-static float text(AxUi *ui, AxUiVertex *vertices, uint32_t *count, const char *string, size_t bytes, float x, float y, float right)
-{
-    const char *p = string;
-    while (*p && (size_t)(p - string) < bytes) {
-        const AxGlyph *glyph = ax_font_glyph(&ui->font, &p);
-        float scale = 0.5f;
-        if (x + glyph->advance * scale > right) break;
-        quad(vertices, count, x + glyph->x0 * scale, y + glyph->y0 * scale, x + glyph->x1 * scale, y + glyph->y1 * scale,
-            glyph->u0, glyph->v0, glyph->u1, glyph->v1, 0.87f, 0.92f, 0.98f, 1.0f);
-        x += glyph->advance * scale;
-    }
-    return x;
-}
 /** Records the final UI node using a fence-protected per-frame vertex buffer. */
 static bool record_ui(const AxRenderFrame *frame, void *user)
 {
     AxUi *ui = user;
     AxConsole *console = ui->console;
-    float width = frame->extent.width / frame->scale_x, height = frame->extent.height / frame->scale_y;
+    float scale = ax_hud_scale(&ui->hud);
+    float width = frame->extent.width / frame->scale_x / scale, height = frame->extent.height / frame->scale_y / scale;
     AxUiVertex *vertices = ui->vertices[frame->frame_index].mapped;
-    uint32_t count = 0;
-    if (!console->open) {
-        const char *hint = "Press / for commands";
-        text(ui, vertices, &count, hint, strlen(hint), 16, height - 20, width - 16);
-        size_t visible = console->output_count < 4 ? console->output_count : 4;
-        for (size_t i = 0; i < visible; ++i) {
-            const char *line = console->output[console->output_count - visible + i];
-            text(ui, vertices, &count, line, strlen(line), 16, height - 50 - (float)(visible - 1 - i) * 20, width - 16);
-        }
-    } else {
-        float panel_height = fminf(height, 300.0f);
-        quad(vertices, &count, 0, height - panel_height, width, height, -1, -1, -1, -1, 0.02f, 0.025f, 0.04f, 0.95f);
-        quad(vertices, &count, 0, height - 38, width, height, -1, -1, -1, -1, 0.07f, 0.09f, 0.13f, 1);
-        size_t visible = panel_height > 60 ? (size_t)((panel_height - 60) / 20) : 0;
-        if (visible > console->output_count) visible = console->output_count;
-        for (size_t i = 0; i < visible; ++i) {
-            const char *line = console->output[console->output_count - visible + i];
-            text(ui, vertices, &count, line, strlen(line), 14, height - 50 - (float)(visible - 1 - i) * 20, width - 14);
-        }
-        /* Keep the cursor visible by scrolling the editable line horizontally. */
-        size_t start = 0;
-        float cursor_width = 0;
-        const char *p = console->line;
-        while ((size_t)(p - console->line) < console->cursor) cursor_width += ax_font_glyph(&ui->font, &p)->advance * 0.5f;
-        while (cursor_width > width - 40 && start < console->cursor) {
-            p = console->line + start;
-            cursor_width -= ax_font_glyph(&ui->font, &p)->advance * 0.5f;
-            start = (size_t)(p - console->line);
-        }
-        text(ui, vertices, &count, console->line + start, console->length - start, 14, height - 14, width - 14);
-        if (fmod(glfwGetTime(), 1.0) < 0.6) quad(vertices, &count, 14 + cursor_width, height - 29, 15 + cursor_width, height - 11, -1,-1,-1,-1, 0.8f,0.9f,1,1);
-    }
+    AxUiCanvas canvas = {vertices, 0, AX_UI_VERTICES, &ui->font, width, height};
+    ax_hud_draw(&ui->hud, &canvas, console, glfwGetTime());
     VkCommandBuffer command = frame->command;
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, ui->pipeline);
     VkViewport viewport = {0, 0, (float)frame->extent.width, (float)frame->extent.height, 0, 1};
@@ -188,13 +136,14 @@ static bool record_ui(const AxRenderFrame *frame, void *user)
     vkCmdBindVertexBuffers(command, 0, 1, &ui->vertices[frame->frame_index].handle, &offset);
     float extent[] = {width, height};
     vkCmdPushConstants(command, ui->pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(extent), extent);
-    vkCmdDraw(command, count, 1, 0, 0);
+    vkCmdDraw(command, canvas.count, 1, 0, 0);
     return true;
 }
 bool ax_ui_create(AxUi *ui, AxRenderer *r, AxConsole *console)
 {
     if (!ui || !r || !r->device || !console) return false;
     *ui = (AxUi){.renderer = r, .console = console};
+    if (!ax_hud_configure(&ui->hud, 2, 3)) return false;
     if (!create_atlas(ui) || !create_pipeline(ui)) goto fail;
     for (size_t i = 0; i < AX_RENDER_FRAMES; ++i)
         if (!ax_buffer_create(r, &ui->vertices[i], sizeof(AxUiVertex) * AX_UI_VERTICES, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true)) goto fail;
@@ -219,4 +168,11 @@ void ax_ui_destroy(AxUi *ui)
     if (ui->atlas) vkDestroyImage(r->device, ui->atlas, NULL);
     if (ui->atlas_memory) vkFreeMemory(r->device, ui->atlas_memory, NULL);
     *ui = (AxUi){0};
+}
+
+void ax_ui_update(AxUi *ui, double time)
+{
+    int width, height;
+    glfwGetWindowSize(ui->renderer->window->handle, &width, &height);
+    ax_hud_update(&ui->hud, ui->console->input, ui->console, time, (float)width, (float)height);
 }
