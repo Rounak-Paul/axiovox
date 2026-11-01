@@ -1,20 +1,19 @@
 #pragma once
 #include "camera.h"
-#include "octree.h"
+#include "geometry.h"
 #include "renderer/renderer.h"
-/** Scene render node: ray casts the sparse voxel octree on a full-screen triangle (contours per AX_WORLD_CONTOURS). */
+/** Triangle terrain node; scene volumes remain GPU-independent and geometry is borrowed until replaced. */
 typedef struct {
     AxRenderer *renderer;
-    const AxOctree *octree;
     const AxCamera *camera;
-    float lod_bias;
-    float sun[3];
-    uint32_t primary_steps, shadow_steps;
+    const AxWorldGeometry *geometry;
+    AxPosition view_origin;
+    double frame_center[3];
+    float local_up[3], altitude, atmosphere_height, sun[3];
 } AxWorldRenderer;
-/**
- * Uploads the octree and registers the "world" scene node; device switches re-upload automatically.
- * @param octree,camera Borrowed; must outlive the node. The octree must not change while registered.
- */
-bool ax_world_renderer_create(AxWorldRenderer *world, AxRenderer *renderer, const AxOctree *octree, const AxCamera *camera);
-/** Releases the node's GPU resources after the renderer is idle; accepts zero state. Call before ax_renderer_destroy. */
+/** Uploads triangle geometry and registers the world node; camera and geometry must outlive registration. */
+bool ax_world_renderer_create(AxWorldRenderer *world, AxRenderer *renderer, const AxWorldGeometry *geometry, const AxCamera *camera);
+/** Publishes replacement geometry between frames; keeps the current asset if preparation fails. */
+bool ax_world_renderer_set_geometry(AxWorldRenderer *world, const AxWorldGeometry *geometry);
+/** Drains/releases device resources; accepts NULL/zero state. Call before destroying the renderer. */
 void ax_world_renderer_destroy(AxWorldRenderer *world);

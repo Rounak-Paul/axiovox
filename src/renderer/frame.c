@@ -209,6 +209,19 @@ bool ax_renderer_draw(AxRenderer *r)
     if (vkResetCommandBuffer(command, 0) != VK_SUCCESS) return false;
     VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     if (vkBeginCommandBuffer(command, &begin) != VK_SUCCESS) return false;
+    int logical_width, logical_height;
+    glfwGetWindowSize(r->window->handle, &logical_width, &logical_height);
+    AxRenderFrame context = {.command = command, .extent = r->extent, .format = r->format, .frame_index = frame,
+        .scale_x = logical_width > 0 ? (float)r->extent.width / logical_width : 1.0f,
+        .scale_y = logical_height > 0 ? (float)r->extent.height / logical_height : 1.0f,
+        .begin_rendering = r->begin_rendering, .end_rendering = r->end_rendering};
+    bool ok = true;
+    r->recording = true;
+    for (size_t i = 0; i < r->node_count && ok; ++i) if (r->nodes[i].enabled && r->nodes[i].prepass) {
+        context.device_state = r->nodes[i].device_state;
+        ok = r->nodes[i].prepass(&context, r->nodes[i].user);
+    }
+    if (!ok) { r->recording = false; vkEndCommandBuffer(command); return false; }
     VkImageMemoryBarrier barrier = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -223,13 +236,6 @@ bool ax_renderer_draw(AxRenderer *r)
     VkRect2D scissor = {{0, 0}, r->extent};
     vkCmdSetViewport(command, 0, 1, &viewport);
     vkCmdSetScissor(command, 0, 1, &scissor);
-    int logical_width, logical_height;
-    glfwGetWindowSize(r->window->handle, &logical_width, &logical_height);
-    AxRenderFrame context = {command, r->extent, r->format, frame,
-        logical_width > 0 ? (float)r->extent.width / logical_width : 1.0f,
-        logical_height > 0 ? (float)r->extent.height / logical_height : 1.0f, NULL};
-    bool ok = true;
-    r->recording = true;
     for (size_t i = 0; i < r->node_count && ok; ++i) if (r->nodes[i].enabled) {
         context.device_state = r->nodes[i].device_state;
         ok = r->nodes[i].record(&context, r->nodes[i].user);

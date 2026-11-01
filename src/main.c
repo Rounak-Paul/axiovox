@@ -6,7 +6,10 @@
 #include "core/log.h"
 #include "renderer/renderer.h"
 #include "ui/ui.h"
-#include "world/demo_scene.h"
+#include "world/stream.h"
+#include <math.h>
+#include <errno.h>
+#include <inttypes.h>
 #include "world/world_renderer.h"
 #include <stdio.h>
 #include <GLFW/glfw3.h>
@@ -22,12 +25,99 @@ typedef struct {
     AxRenderer renderer;
     AxUi ui;
     AxCamera camera;
-    AxOctree world;
+    AxScene scene;
+    AxWorldStream stream;
+    AxWorldGeometry geometry;
+    AxPosition view_origin;
+    double altitude;
+    AxPlanetId active_planet, nearby_planet;
+    float flight_speed;
     AxWorldRenderer world_renderer;
     AxJobs *jobs;
     AxRuntime runtime;
     char settings_path[AX_PATH_CAPACITY];
 } Application;
+/** Publishes disposable surface assets while preserving the authoritative scene and camera frame. */
+static bool publish_world(Application *app)
+{
+    AxWorldGeometry next = {0};
+    if (!ax_world_geometry_build(&app->scene, app->stream.regions, app->stream.count, &next)) return false;
+    if (app->world_renderer.renderer && !ax_world_renderer_set_geometry(&app->world_renderer, &next)) {
+        ax_world_geometry_destroy(&next);
+        return false;
+    }
+    ax_world_geometry_destroy(&app->geometry);
+    app->geometry = next;
+    app->world_renderer.geometry = &app->geometry;
+    app->stream.dirty = false;
+    return true;
+}
+/** Visits a body within the same scene, staging all terrain assets before committing the camera pose. */
+static bool visit_planet(Application *app, AxPlanetId id)
+{
+    const AxPlanet *planet = ax_scene_planet(&app->scene, id);
+    if (!planet) return false;
+    double radius = ax_planet_description(planet)->radius;
+    AxPosition eye;
+    if (!ax_position_from_meters(&eye, (double[3]){0, radius + 12, 20})) return false;
+    AxWorldStream next = {0};
+    if (!ax_world_stream_create(&next, &app->scene, id, &eye, app->jobs)) return false;
+    AxWorldStream previous = app->stream;
+    app->stream = next;
+    if (!publish_world(app)) {
+        app->stream = previous;
+        ax_world_stream_destroy(&next, app->jobs);
+        return false;
+    }
+    ax_world_stream_destroy(&previous, app->jobs);
+    app->active_planet = id;
+    app->view_origin = eye;
+    ax_camera_init(&app->camera, (float[3]){0,0,0}, 0, -0.15f);
+    return true;
+}
+/** Reconciles a small float flight displacement with the precise planet frame and updates continuous LOD streaming. */
+static bool update_world(Application *app)
+{
+    double move[3] = {app->camera.position[0], app->camera.position[1], app->camera.position[2]};
+    if (!ax_position_move(&app->view_origin, move)) return false;
+    memset(app->camera.position, 0, sizeof(app->camera.position));
+    const AxPlanet *anchor = ax_scene_planet(&app->scene, app->active_planet);
+    if (!anchor) return false;
+    const AxPlanetDesc *frame = ax_planet_description(anchor);
+    app->world_renderer.view_origin = app->view_origin;
+    memcpy(app->world_renderer.frame_center, frame->center, sizeof(frame->center));
+    double nearest = INFINITY;
+    for (size_t i = 0; i < app->scene.count; ++i) {
+        const AxPlanetDesc *body = ax_planet_description(app->scene.planets[i]);
+        AxPosition local = app->view_origin;
+        double delta[3];
+        for (size_t k = 0; k < 3; ++k) delta[k] = frame->center[k] - body->center[k];
+        if (!ax_position_move(&local, delta)) return false;
+        const AxPosition zero = {0};
+        ax_position_difference(&local, &zero, delta);
+        double length = hypot(hypot(delta[0], delta[1]), delta[2]);
+        double altitude = length - body->radius;
+        if (fabs(altitude) < nearest) {
+            nearest = fabs(altitude);
+            app->nearby_planet = body->id;
+            app->altitude = altitude;
+            app->world_renderer.altitude = (float)altitude;
+            app->world_renderer.atmosphere_height = body->id == 1 ? (float)(body->radius * 0.01) : 0;
+            for (size_t k = 0; k < 3; ++k) app->world_renderer.local_up[k] = length > 0 ? (float)(delta[k] / length) : (k == 1 ? 1 : 0);
+        }
+    }
+    if (!ax_world_stream_update(&app->stream, &app->scene, app->active_planet, &app->view_origin, app->jobs)) return false;
+    if (app->stream.dirty && !publish_world(app)) return false;
+    return true;
+}
+/** Parses one finite bounded brush parameter without accepting trailing text. */
+static bool brush_number(const char *text, double *value)
+{
+    char *end;
+    errno = 0;
+    *value = strtod(text, &end);
+    return !errno && end != text && !*end && isfinite(*value) && *value > 0 && *value <= 32;
+}
 /** Applies validated global scale and hotbar rows to the current HUD. */
 static bool configure_hud(Application *app)
 {
@@ -82,6 +172,75 @@ static bool command(int argc, const char *const *argv, void *user)
         output(app, result);
         return true;
     }
+    if (!strcmp(argv[0], "world.planets") && argc == 1) {
+        for (size_t i = 0; i < app->scene.count; ++i) {
+            const AxPlanetDesc *d = ax_planet_description(app->scene.planets[i]);
+            char message[160];
+            snprintf(message, sizeof(message), "%s (%" PRIu64 ") radius %.0f m%s", ax_planet_name(d->id), d->id, d->radius,
+                     d->id == app->active_planet ? " (active)" : "");
+            output(app, message);
+        }
+        return true;
+    }
+    if (!strcmp(argv[0], "world.visit") && argc == 2) {
+        char *end;
+        errno = 0;
+        uint64_t id = strtoull(argv[1], &end, 10);
+        return argv[1][0] != '-' && end != argv[1] && !*end && !errno && visit_planet(app, id);
+    }
+    if ((!strcmp(argv[0], "world.refresh") || !strcmp(argv[0], "world.recenter")) && argc == 1) return update_world(app);
+    if (!strcmp(argv[0], "world.speed") && argc == 2) {
+        char *end;
+        errno = 0;
+        double speed = strtod(argv[1], &end);
+        if (errno || end == argv[1] || *end || !isfinite(speed) || speed <= 0 || speed > 1000000) return false;
+        app->flight_speed = (float)speed;
+        return true;
+    }
+    if (!strcmp(argv[0], "world.altitude") && argc == 2) {
+        char *end;
+        errno = 0;
+        double altitude = strtod(argv[1], &end);
+        const AxPlanet *planet = ax_scene_planet(&app->scene, app->active_planet);
+        if (errno || end == argv[1] || *end || !isfinite(altitude) || altitude < 0 || altitude > 1e12 || !planet) return false;
+        double up[3], delta[3], position[3];
+        if (!ax_planet_up(&app->view_origin, up)) return false;
+        const AxPosition zero = {0};
+        ax_position_difference(&app->view_origin, &zero, position);
+        double current = hypot(hypot(position[0], position[1]), position[2]) - ax_planet_description(planet)->radius;
+        for (size_t i = 0; i < 3; ++i) delta[i] = up[i] * (altitude - current);
+        return ax_position_move(&app->view_origin, delta);
+    }
+    if (!strcmp(argv[0], "world.save") && argc == 2) return ax_scene_save(&app->scene, argv[1]);
+    if (!strcmp(argv[0], "world.load") && argc == 2) {
+        AxScene candidate = {0};
+        if (!ax_scene_load(&candidate, argv[1]) || !candidate.count) { ax_scene_destroy(&candidate); return false; }
+        AxScene previous = app->scene;
+        AxPlanetId target = ax_scene_planet(&candidate, app->active_planet) ? app->active_planet :
+                            ax_planet_description(candidate.planets[0])->id;
+        app->scene = candidate;
+        if (!visit_planet(app, target)) { app->scene = previous; ax_scene_destroy(&candidate); return false; }
+        app->scene.events = previous.events;
+        ax_scene_destroy(&previous);
+        return true;
+    }
+    if ((!strcmp(argv[0], "world.carve") || !strcmp(argv[0], "world.build")) && (argc == 3 || argc == 4)) {
+        double radius, distance;
+        if (!brush_number(argv[1], &radius) || !brush_number(argv[2], &distance) ||
+            (argc == 4 && strcmp(argv[3], "box") && strcmp(argv[3], "sphere"))) return false;
+        if (!update_world(app)) return false;
+        float forward[3];
+        ax_camera_basis(&app->camera, forward, NULL, NULL);
+        AxVolumeEdit edit = {.position = app->view_origin, .half_extent = {radius, radius, radius},
+            .shape = argc == 4 && !strcmp(argv[3], "box") ? AX_BRUSH_BOX : AX_BRUSH_SPHERE,
+            .material = AX_MATERIAL_BUILDING, .remove = !strcmp(argv[0], "world.carve")};
+        double delta[3];
+        for (size_t i = 0; i < 3; ++i) delta[i] = app->camera.position[i] + forward[i] * distance;
+        const AxPlanetDesc *frame = ax_planet_description(ax_scene_planet(&app->scene, app->active_planet));
+        const AxPlanetDesc *body = ax_planet_description(ax_scene_planet(&app->scene, app->nearby_planet));
+        for (size_t i = 0; i < 3; ++i) delta[i] += frame->center[i] - body->center[i];
+        return ax_position_move(&edit.position, delta) && ax_scene_edit(&app->scene, app->nearby_planet, &edit);
+    }
     if (!strcmp(argv[0], "core.help") && argc == 1) {
         output(app, "name [value] reads/writes settings. Quotes and backslash escapes supported.");
         for (size_t i = 0; i < app->commands.count; ++i) output(app, app->commands.entries[i].name);
@@ -128,7 +287,8 @@ int main(int argc, char **argv)
     ax_log_set_level((AxLogLevel)ax_config_get(&app.config, "log.level")->value);
     if (!ax_event_subscribe(&events, AX_EVENT_CONFIG_CHANGED, config_changed, &app) ||
         !ax_event_subscribe(&events, AX_EVENT_DEVICE_SELECTED, device_selected, NULL)) goto cleanup;
-    const char *names[] = {"core.help", "core.quit", "core.config.save", "core.config.load", "renderer.nodes", "renderer.node.enable"};
+    const char *names[] = {"core.help", "core.quit", "core.config.save", "core.config.load", "renderer.nodes", "renderer.node.enable",
+                           "world.speed", "world.altitude", "world.refresh", "world.recenter", "world.planets", "world.visit", "world.carve", "world.build", "world.save", "world.load"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
         if (!ax_command_register(&app.commands, names[i], command, &app)) goto cleanup;
     for (size_t i = 0; i < sizeof(app.config.settings) / sizeof(app.config.settings[0]); ++i)
@@ -137,18 +297,23 @@ int main(int argc, char **argv)
     if (!ax_console_init(&app.console, &app.commands, &app.input, &events)) goto cleanup;
     app.jobs = ax_jobs_create((size_t)ax_config_get(&app.config, "jobs.workers")->value);
     if (!app.jobs) { ax_log(AX_LOG_ERROR, "Worker pool creation failed"); goto cleanup; }
+    ax_scene_init(&app.scene, &events);
+    AxPlanetDesc first = {.id = 1, .seed = 42, .radius = 1000000, .terrain_height = 8, .terrain_frequency = 0.06};
+    AxPlanetDesc second = {.id = 2, .seed = 917, .center = {1200000, 1800000, -2400000}, .radius = 270000, .terrain_height = 12, .terrain_frequency = 0.04, .surface_material = AX_MATERIAL_ROCK};
+    if (!ax_scene_add_planet(&app.scene, &first) || !ax_scene_add_planet(&app.scene, &second)) goto cleanup;
     struct timespec build_begin, build_end;
     timespec_get(&build_begin, TIME_UTC);
-    if (!ax_demo_scene_build(&app.world, &app.camera, app.jobs)) { ax_log(AX_LOG_ERROR, "World generation failed"); goto cleanup; }
+    if (!visit_planet(&app, 1)) { ax_log(AX_LOG_ERROR, "World generation failed"); goto cleanup; }
     timespec_get(&build_end, TIME_UTC);
-    ax_log(AX_LOG_INFO, "World %u^3 over %.0f m: %u descriptors, %u far pointers, %u values, %u contours, %.1f KiB in %.0f ms",
-           app.world.size, (double)app.world.extent, app.world.descriptor_count, app.world.far_count, app.world.value_count, app.world.contour_count,
-           (double)app.world.word_count * sizeof(uint32_t) / 1024.0,
+    app.flight_speed = 6;
+    ax_log(AX_LOG_INFO, "Terra/Luna: %zu mesh regions, %zu triangles, %.1f MiB built in %.0f ms", app.geometry.count, app.geometry.index_count / 3,
+           (double)(app.geometry.vertex_count * sizeof(AxSurfaceVertex) + app.geometry.index_count * sizeof(uint32_t)) / (1024 * 1024),
            (double)(build_end.tv_sec - build_begin.tv_sec) * 1000.0 + (double)(build_end.tv_nsec - build_begin.tv_nsec) / 1e6);
     if (!ax_window_create(&app.window, &events, ax_config_get(&app.config, "window.width")->value, ax_config_get(&app.config, "window.height")->value)) goto cleanup;
     ax_window_set_input(&app.window, &app.input);
     if (!ax_renderer_create(&app.renderer, &app.window, &events, ax_config_get(&app.config, "renderer.device")->value)) goto cleanup;
-    if (!ax_world_renderer_create(&app.world_renderer, &app.renderer, &app.world, &app.camera)) { ax_log(AX_LOG_ERROR, "World renderer initialization failed"); goto cleanup; }
+    if (!ax_world_renderer_create(&app.world_renderer, &app.renderer, &app.geometry, &app.camera)) { ax_log(AX_LOG_ERROR, "World renderer initialization failed"); goto cleanup; }
+    if (!update_world(&app)) goto cleanup;
     if (!ax_ui_create(&app.ui, &app.renderer, &app.console)) { ax_log(AX_LOG_ERROR, "UI initialization failed"); goto cleanup; }
     if (!configure_hud(&app)) goto cleanup;
     ax_ui_bind_settings(&app.ui, &app.config, app.settings_path);
@@ -177,8 +342,14 @@ int main(int argc, char **argv)
         if (smoke && frames == 6) app.ui.hud.menu.category = AX_SETTINGS_VIDEO;
         double now = glfwGetTime();
         ax_ui_update(&app.ui, now);
+        bool cruise = ax_input_down(&app.input, AX_KEY_LEFT_SHIFT) || ax_input_down(&app.input, AX_KEY_RIGHT_SHIFT);
+        app.camera.move_speed = cruise ? (float)fmin(250000, app.flight_speed + fmax(app.altitude, 0) * 0.2) : app.flight_speed;
         ax_camera_update(&app.camera, &app.input, now - previous_time);
         previous_time = now;
+        if (!update_world(&app)) {
+            if (!app.stream.failed) output(&app, "Terrain streaming update failed; existing planet coverage retained.");
+            app.stream.failed = true;
+        } else app.stream.failed = false;
         ax_window_set_cursor_locked(&app.window, !app.input.captured && glfwGetWindowAttrib(app.window.handle, GLFW_FOCUSED) &&
                                                  !glfwGetWindowAttrib(app.window.handle, GLFW_ICONIFIED));
         if (!app.runtime.healthy) { ax_log(AX_LOG_ERROR, "Runtime rollback failed"); goto cleanup; }
@@ -190,12 +361,14 @@ int main(int argc, char **argv)
     }
     status = EXIT_SUCCESS;
 cleanup:
+    ax_world_stream_destroy(&app.stream, app.jobs);
     ax_jobs_destroy(app.jobs);
     if (app.renderer.device) vkDeviceWaitIdle(app.renderer.device);
     ax_ui_destroy(&app.ui);
     ax_world_renderer_destroy(&app.world_renderer);
     ax_renderer_destroy(&app.renderer);
-    ax_octree_destroy(&app.world);
+    ax_world_geometry_destroy(&app.geometry);
+    ax_scene_destroy(&app.scene);
     ax_console_destroy(&app.console);
     ax_window_destroy(&app.window);
     return status;

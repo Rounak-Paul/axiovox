@@ -5,6 +5,10 @@ typedef struct AxRenderer AxRenderer;
 typedef struct AxRendererChange AxRendererChange;
 #define AX_RENDER_FRAMES 2
 #define AX_RENDER_NODES 32
+/**
+ * Borrowed per-frame recording context. begin_rendering/end_rendering let prepass callbacks record
+ * their own dynamic-rendering scopes into node-owned attachments.
+ */
 typedef struct {
     VkCommandBuffer command;
     VkExtent2D extent;
@@ -12,10 +16,17 @@ typedef struct {
     uint32_t frame_index;
     float scale_x, scale_y;
     void *device_state;
+    PFN_vkCmdBeginRenderingKHR begin_rendering;
+    PFN_vkCmdEndRenderingKHR end_rendering;
 } AxRenderFrame;
 typedef bool (*AxRenderNodeFn)(const AxRenderFrame *frame, void *user);
 typedef bool (*AxRenderDeviceCreateFn)(AxRenderer *device, void *user, void **state);
 typedef void (*AxRenderDeviceDestroyFn)(AxRenderer *device, void *user, void *state);
+/**
+ * Ordered render node. prepass (optional) runs before the swapchain rendering scope opens, in registration order,
+ * and may record barriers and complete rendering scopes of its own; it must leave no scope open. record runs
+ * inside the shared swapchain color scope.
+ */
 typedef struct {
     const char *name;
     AxRenderNodeFn record;
@@ -24,6 +35,7 @@ typedef struct {
     AxRenderDeviceCreateFn create_device;
     AxRenderDeviceDestroyFn destroy_device;
     void *device_state;
+    AxRenderNodeFn prepass;
 } AxRenderNode;
 struct AxRenderer {
     VkInstance instance;

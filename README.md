@@ -58,22 +58,56 @@ Custom SDK layouts can set `AXIOVOX_MOLTENVK_LIBRARY` (macOS) or
 
 ## World and camera
 
-The world is drawn by ray casting a sparse voxel octree on a single full-screen
-triangle (Laine & Karras, *Efficient Sparse Voxel Octrees*, NVR-2010-001): no
-triangle meshes. Voxels are plain cubes by default. The paper's contours are a
-compile-time option: configure with `-DAXIOVOX_WORLD_CONTOURS=ON` (generates
-`AX_WORLD_CONTOURS 1` in `world_config.h`, shared by the builder and
-`shaders/world.frag`) and each voxel's shape becomes its cube intersected with its
-own and all ancestor contour slabs, keeping surfaces smooth when voxels are larger
-than a pixel. Until a scene hierarchy/ECS exists,
-`src/world/demo_scene.c` hardcodes a 64 m signed-distance world (terrain, pond,
-trees, ruin) voxelized at 1024³ (about 6 cm voxels) on the worker pool before the
-window opens (about 2 s with 4 workers).
+The world uses **solid procedural density volumes with rasterized triangle surfaces**.
+Terra (radius 1,000 km) and Luna (radius 270 km) share one continuous scene. Indexed
+surfaces are extracted with Transvoxel-compatible marching cubes, and transition
+cells stitch neighboring 2:1 detail levels. There is no separate globe/space scene.
+Density and material queries remain authoritative; triangle meshes are disposable
+render assets. The former octree ray caster, beam passes and temporary demo are removed.
 
-Free-flight camera (6 m/s): mouse looks, W/S move along the view direction, A/D
-strafe, E/Q rise/fall along world up, Shift moves 4x faster. The cursor is locked and
-hidden during gameplay; opening the console, pausing, or losing focus releases it.
-HUD icons are pointer targets only while the cursor is free.
+Moving the camera streams terrain automatically. Workers sample immutable scene
+snapshots, reuse unchanged surface meshes, and publish complete nested LOD layouts
+so neighboring levels stay consistent. Old coverage remains until replacements are
+ready. Finer regions own their volume, including excavations. The default finest
+region spans 32 m with 64 cells per side (0.5 m spacing); distant levels use coarser
+sampling. Resolution is independent of the precise coordinate addressing system.
+
+Rendering uses indexed triangles, backface culling, infinite reverse-Z depth,
+directional shadow mapping, an atmosphere/space background, and an offscreen world
+pass composited before UI. GPU transforms are camera-relative; integer addresses
+and bounded double offsets retain local movement precision at planet scale.
+
+Free-flight controls: mouse looks, W/S move along the view direction, A/D strafe,
+and E/Q move along the fixed Y axis. Base speed is 6 m/s. Hold **Shift** for cruise:
+speed increases with altitude, allowing surface-to-space travel. The cursor is locked
+and hidden during gameplay; menus, console, and focus loss release it.
+
+```text
+/world.planets
+/world.visit 2
+/world.carve 3 12
+/world.build 1 8 box
+/world.speed 100
+/world.altitude 2000000
+/world.save "my-scene.axs"
+/world.load "my-scene.axs"
+```
+
+`world.visit` is an optional navigation shortcut; flight between bodies requires no
+scene transition. `world.altitude` moves radially above the reference planet for
+inspection; look toward the body to see its sphere. `world.speed` sets base speed in
+meters per second. `world.recenter` and `world.refresh` remain compatible commands,
+but recentering happens automatically.
+
+Carve/build take radius (box half extent) and distance ahead in meters; optional shape
+is `sphere` (default) or `box`. Edits affect the nearest body. Saves store planet
+recipes, material settings, and ordered edits independently of render caches.
+Version 2 saves also load older version 1 data. Camera pose is not saved.
+
+Terrain generation is asynchronous, but publishing new vertex/index buffers still waits
+for GPU completion. Stitching closes spatial LOD seams; temporal LOD changes can
+still pop. Edit indexing, mesh simplification and upload scheduling remain optimization work. The moon's position is static, and character
+gravity/collision and orbital simulation are not implemented.
 
 ## Game HUD
 
@@ -210,21 +244,19 @@ narrow viewports, the centered hotbar shrinks to keep clear of the icon strip.
   two frames in flight, explicit image transitions, resize/out-of-date recreation,
   and dynamic rendering without render passes or framebuffers. Discrete GPUs rank
   before integrated, virtual, then others; ties follow enumeration order.
-- Render nodes record in registration order inside a single color rendering scope;
+- Render nodes may record an optional prepass before the swapchain scope opens
+  (their own barriers and complete rendering scopes, e.g. offscreen targets), then
+  record in registration order inside a single color rendering scope;
   background is the initial scene node, UI is always last. Scene nodes can be enabled
   at runtime. Node callbacks borrow frame context and must not change the registry,
   end rendering, or perform transfers/compute requiring another rendering scope.
   This is an ordered node pipeline, not an automatic resource/dependency graph.
-- `world/`: GPU-independent camera controller, ESVO octree builder/point query, and
-  the temporary demo scene (`axiovox_world`); the `world` render node
-  (`axiovox_world_renderer`) uploads the octree per device and ray casts it in
-  `shaders/world.frag`. The builder samples a signed-distance source
-  (`AxVoxelSource`) in parallel and stores surface voxels only. Octree words:
-  64-bit child descriptors (child pointer, far bit, valid/non-leaf masks, contour
-  pointer/mask), one attachment lookup entry per descriptor, ABGR values for every
-  valid child (non-leaf values are averaged colors for level-of-detail termination),
-  then 32-bit contours. Leaf contours enclose the sampled surface; parent contours
-  enclose their children's cube-slab shapes, so ancestors never cut holes.
+- `world/`: scene-owned planet recipes and solid edits, precise coordinates, atomic
+  saves, indexed surface extraction, transition cells, immutable streaming snapshots,
+  and packed render geometry (`axiovox_world`). Scene volumes do not depend on a
+  renderer. `axiovox_world_renderer` owns Vulkan vertex/index buffers, frame metadata,
+  depth/color/shadow targets and raster pipelines, with device migration and resize
+  support. The camera remains a GPU-independent free-flight controller.
 - `ui/`: console state/editor, GPU-independent draw list and HUD layout, and a
   separate Vulkan UI node. The R8 font atlas uses
   the Causality stb_truetype approach and embedded Departure Mono Nerd Font Mono, with
@@ -243,4 +275,4 @@ Windows/POSIX threads, a 256-job bounded queue, and explicit submission backpres
 Job data remains caller-owned until completion. Workers must return normally and
 must not wait/destroy their own pool or access main-thread services directly.
 Shutdown drains workers, waits for GPU work, and destroys UI, world node, renderer,
-octree, then window.
+packed geometry, scene, then window.

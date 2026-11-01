@@ -36,23 +36,24 @@ target_link_libraries(axiovox_core PUBLIC Threads::Threads)
 
 set(generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${generated_dir}")
-option(AXIOVOX_WORLD_CONTOURS "Build and ray cast ESVO voxel contours" OFF)
-if(AXIOVOX_WORLD_CONTOURS)
-    set(AX_WORLD_CONTOURS 1)
-else()
-    set(AX_WORLD_CONTOURS 0)
-endif()
-file(CONFIGURE OUTPUT "${generated_dir}/world_config.h" CONTENT "#ifndef AX_WORLD_CONFIG_H\n#define AX_WORLD_CONFIG_H\n#define AX_WORLD_CONTOURS @AX_WORLD_CONTOURS@\n#endif\n" @ONLY)
-foreach(shader IN ITEMS ui.vert ui.frag world.vert world.frag)
+foreach(shader IN ITEMS ui.vert ui.frag world.vert world.frag world_sky.vert world_sky.frag world_composite.frag)
     add_custom_command(
         OUTPUT "${generated_dir}/${shader}.inc"
-        COMMAND Vulkan::glslc --target-env=vulkan1.2 -O -mfmt=c -I "${generated_dir}"
+        COMMAND Vulkan::glslc --target-env=vulkan1.2 -O -mfmt=c
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}"
                 -o "${generated_dir}/${shader}.inc"
-        DEPENDS "shaders/${shader}" "${generated_dir}/world_config.h"
+        DEPENDS "shaders/${shader}" shaders/world_common.glsl
         VERBATIM
     )
 endforeach()
+add_custom_command(
+    OUTPUT "${generated_dir}/world_shadow.frag.inc"
+    COMMAND Vulkan::glslc --target-env=vulkan1.2 -O -mfmt=c -DAX_WORLD_SHADOW=1
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/world.frag"
+            -o "${generated_dir}/world_shadow.frag.inc"
+    DEPENDS "shaders/world.frag" shaders/world_common.glsl
+    VERBATIM
+)
 add_custom_command(
     OUTPUT "${generated_dir}/embedded_font.c"
     COMMAND "${CMAKE_COMMAND}"
@@ -85,14 +86,16 @@ add_library(axiovox_ui STATIC src/ui/ui.c "${generated_dir}/ui.vert.inc" "${gene
 target_include_directories(axiovox_ui PRIVATE "${generated_dir}")
 target_link_libraries(axiovox_ui PUBLIC axiovox_renderer axiovox_ui_layout)
 
-add_library(axiovox_world STATIC src/world/camera.c src/world/octree.c src/world/demo_scene.c)
-target_include_directories(axiovox_world PUBLIC "${generated_dir}")
+add_library(axiovox_world STATIC src/world/camera.c src/world/surface.c src/world/coordinates.c src/world/scene.c src/world/geometry.c src/world/stream.c)
 target_link_libraries(axiovox_world PUBLIC axiovox_core)
+target_include_directories(axiovox_world SYSTEM PRIVATE vendors)
 if(UNIX)
     target_link_libraries(axiovox_world PUBLIC m)
 endif()
 
-add_library(axiovox_world_renderer STATIC src/world/world_renderer.c "${generated_dir}/world.vert.inc" "${generated_dir}/world.frag.inc")
+add_library(axiovox_world_renderer STATIC src/world/world_renderer.c
+    "${generated_dir}/world.vert.inc" "${generated_dir}/world.frag.inc" "${generated_dir}/world_shadow.frag.inc"
+    "${generated_dir}/world_sky.vert.inc" "${generated_dir}/world_sky.frag.inc" "${generated_dir}/world_composite.frag.inc")
 target_include_directories(axiovox_world_renderer PRIVATE "${generated_dir}")
 target_link_libraries(axiovox_world_renderer PUBLIC axiovox_renderer axiovox_world)
 
@@ -155,6 +158,24 @@ if(BUILD_TESTING)
     add_test(NAME menu COMMAND axiovox_menu_tests)
     set_tests_properties(menu PROPERTIES TIMEOUT 30)
 
+    add_executable(axiovox_surface_tests tests/surface_tests.c)
+    target_link_libraries(axiovox_surface_tests PRIVATE axiovox_world)
+    set_target_properties(axiovox_surface_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    add_test(NAME surface COMMAND axiovox_surface_tests)
+    set_tests_properties(surface PROPERTIES TIMEOUT 60)
+
+    add_executable(axiovox_stream_tests tests/stream_tests.c)
+    target_link_libraries(axiovox_stream_tests PRIVATE axiovox_world)
+    set_target_properties(axiovox_stream_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    add_test(NAME stream COMMAND axiovox_stream_tests)
+    set_tests_properties(stream PROPERTIES TIMEOUT 180)
+
+    add_executable(axiovox_scene_tests tests/scene_tests.c)
+    target_link_libraries(axiovox_scene_tests PRIVATE axiovox_world)
+    set_target_properties(axiovox_scene_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    add_test(NAME scene COMMAND axiovox_scene_tests)
+    set_tests_properties(scene PROPERTIES TIMEOUT 60)
+
     add_executable(axiovox_world_tests tests/world_tests.c)
     target_link_libraries(axiovox_world_tests PRIVATE axiovox_world)
     set_target_properties(axiovox_world_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
@@ -167,12 +188,16 @@ if(BUILD_TESTING)
     add_executable(axiovox_runtime_tests tests/runtime_tests.c)
     target_link_libraries(axiovox_runtime_tests PRIVATE axiovox_ui axiovox_runtime)
     set_target_properties(axiovox_runtime_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    add_executable(axiovox_world_render_tests tests/world_render_tests.c)
+    target_link_libraries(axiovox_world_render_tests PRIVATE axiovox_world_renderer)
+    set_target_properties(axiovox_world_render_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
     option(AXIOVOX_TEST_GPU "Enable tests requiring a display and Vulkan GPU" OFF)
     if(AXIOVOX_TEST_GPU)
         add_test(NAME renderer COMMAND axiovox_renderer_tests)
         add_test(NAME presentation COMMAND axiovox --smoke-test)
         add_test(NAME runtime COMMAND axiovox_runtime_tests)
+        add_test(NAME world_render COMMAND axiovox_world_render_tests)
         add_test(NAME live_presentation COMMAND axiovox --smoke-test --command "jobs.workers 2" --command "renderer.device 0" --command "renderer.device -1")
-        set_tests_properties(renderer presentation runtime live_presentation PROPERTIES TIMEOUT 30)
+        set_tests_properties(renderer presentation runtime world_render live_presentation PROPERTIES TIMEOUT 30)
     endif()
 endif()
