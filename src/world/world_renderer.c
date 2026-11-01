@@ -13,7 +13,7 @@ typedef struct {
 } AxWorldDevice;
 typedef struct {
     float origin[4], forward[4], right[4], up[4], sun[4];
-    uint32_t info[4];
+    uint32_t info[4], extra[4];
 } AxWorldView;
 static const uint32_t vertex_shader[] =
 #include "world.vert.inc"
@@ -99,24 +99,26 @@ static bool create_world_device(AxRenderer *r, void *user, void **state)
     *state = gpu;
     return gpu && upload_octree(r, world->octree, gpu) && create_pipeline(r, gpu);
 }
-/** Builds per-frame view constants: octree-space eye, scaled camera basis, cone footprint, and layout offsets. */
+/** Builds per-frame view constants: octree-space eye, scaled camera basis, cone footprint, shadow bias, and layout offsets. */
 static AxWorldView view_constants(const AxWorldRenderer *world, VkExtent2D extent)
 {
     const AxCamera *camera = world->camera;
-    float size = (float)world->octree->size;
+    float world_extent = world->octree->extent;
     float tangent = tanf(camera->fov_y * 0.5f), aspect = (float)extent.width / (float)extent.height;
     float forward[3], right[3], up[3];
     ax_camera_basis(camera, forward, right, up);
-    AxWorldView view = {.info = {world->octree->lookup_offset, world->octree->value_offset, world->primary_steps, world->shadow_steps}};
+    AxWorldView view = {.info = {world->octree->lookup_offset, world->octree->value_offset, world->primary_steps, world->shadow_steps},
+        .extra = {world->octree->contour_offset, 0, 0, 0}};
     for (int i = 0; i < 3; ++i) {
-        view.origin[i] = 1.0f + camera->position[i] / size;
+        view.origin[i] = 1.0f + camera->position[i] / world_extent;
         view.forward[i] = forward[i];
         view.right[i] = right[i] * tangent * aspect;
         view.up[i] = up[i] * tangent;
         view.sun[i] = world->sun[i];
     }
     view.origin[3] = 2.0f * tangent / (float)extent.height * world->lod_bias;
-    view.forward[3] = size;
+    view.forward[3] = world_extent;
+    view.sun[3] = 0.75f / (float)world->octree->size;
     return view;
 }
 /** Records the full-screen ray cast; the fragment shader writes every pixel. */
@@ -139,11 +141,11 @@ static bool record_world(const AxRenderFrame *frame, void *user)
 }
 bool ax_world_renderer_create(AxWorldRenderer *world, AxRenderer *renderer, const AxOctree *octree, const AxCamera *camera)
 {
-    if (!world || !renderer || !renderer->device || !octree || !octree->words || !octree->size || !camera) return false;
+    if (!world || !renderer || !renderer->device || !octree || !octree->words || !octree->size || !(octree->extent > 0.0f) || !camera) return false;
     float sun[3] = {0.42f, 0.78f, 0.46f};
     float length = sqrtf(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
     *world = (AxWorldRenderer){.renderer = renderer, .octree = octree, .camera = camera, .lod_bias = 1.0f,
-        .sun = {sun[0] / length, sun[1] / length, sun[2] / length}, .primary_steps = 768, .shadow_steps = 384};
+        .sun = {sun[0] / length, sun[1] / length, sun[2] / length}, .primary_steps = 1024, .shadow_steps = 512};
     AxRenderNode node = {.name = "world", .record = record_world, .user = world, .enabled = true,
         .create_device = create_world_device, .destroy_device = destroy_world_device};
     if (ax_renderer_register_node(renderer, &node)) return true;

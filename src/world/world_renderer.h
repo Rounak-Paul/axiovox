@@ -2,7 +2,7 @@
 #include "camera.h"
 #include "octree.h"
 #include "renderer/renderer.h"
-/** Scene render node: ray casts the sparse voxel octree on a full-screen triangle. */
+/** Scene render node: ray casts the sparse voxel octree on a full-screen triangle (contours per AX_WORLD_CONTOURS). */
 typedef struct {
     AxRenderer *renderer;
     const AxOctree *octree;

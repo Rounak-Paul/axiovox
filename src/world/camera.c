@@ -20,7 +20,7 @@ void ax_camera_init(AxCamera *camera, const float position[3], float yaw, float 
 {
     if (!camera) return;
     *camera = (AxCamera){.yaw = wrap_yaw(yaw), .pitch = clamp_pitch(pitch), .fov_y = 70.0f * AX_PI / 180.0f,
-        .move_speed = 24.0f, .boost = 4.0f, .sensitivity = 0.0025f};
+        .move_speed = 6.0f, .boost = 4.0f, .sensitivity = 0.0025f};
     if (position)
         for (int i = 0; i < 3; ++i) camera->position[i] = isfinite(position[i]) ? position[i] : 0.0f;
 }

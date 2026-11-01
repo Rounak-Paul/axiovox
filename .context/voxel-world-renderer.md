@@ -1,51 +1,63 @@
-# Voxel world renderer and camera
+# Voxel world renderer, contours, and camera
 
 ## Scope / status
 
-Implemented the world renderer from ~/Downloads/laine2010tr1_paper.pdf (Laine & Karras,
-Efficient Sparse Voxel Octrees, NVR-2010-001): full-screen triangle + per-pixel SVO
-ray cast (paper Fig. 15), free-flight camera, temporary hardcoded scene. No commits/pushes.
-Future improvements (contours, compressed attributes, streaming/blocks, ECS scene) build on this core.
+World renderer from ~/Downloads/laine2010tr1_paper.pdf (Laine & Karras, ESVO, NVR-2010-001):
+full-screen triangle + per-pixel SVO ray cast (Fig. 15 / Appendix A) with contours
+(Sections 5.2-5.3), free-flight camera, temporary hardcoded SDF scene at 1024^3 / 64 m.
+No commits/pushes. Not yet done from the paper: compressed attributes (5.5), beam
+optimization (6.2), post-process filter (6.3), blocks/streaming (7).
 
 ## Boundaries
 
-- `core/input.*`: `mouse_dx/dy` accumulate per frame via `ax_input_mouse_move`; first
-  sample after invalidation (lock change, focus loss) yields no motion.
-  `ax_input_mouse_delta` returns motion only when pointer locked and not captured.
-- `core/window.*`: `ax_window_set_cursor_locked` (GLFW disabled cursor + raw motion
-  when supported). main.c locks when `!input.captured && focused && !iconified`.
-  HUD icons skip hover/click while `pointer_locked` (virtual cursor is meaningless).
-- `renderer`: added `ax_renderer_remove_node` (drain, destroy device state, order-preserving
-  removal) and `ax_buffer_upload` (staging copy to device-local buffer + barrier).
-- `world/camera.*` (lib axiovox_world): right-handed Y-up, yaw 0 → -Z. W/S along view
-  (incl. pitch), A/D strafe, E/Q world up/down, Shift x4. Pitch clamped, yaw wrapped,
-  dt clamped to 0.1 s, non-finite input ignored. Defaults: fov 70°, 24 u/s, 0.0025 rad/px.
-- `world/octree.*`: dense `AxVoxelGrid` (uint8 palette, 0 empty) → ESVO word array:
-  [descriptors 2 words each][lookup 1 word each][ABGR values]. Descriptor word0 =
-  ptr[31:17] | far[16] | valid[15:8] | non-leaf[7:0] (non-leaf mask as in paper's code);
-  word1 = contour slot reserved (0). Child groups: [members][far slots][member subtrees].
-  Far slot word0 = offset relative to the parent descriptor. Lookup = valuePtr<<8 | mask
-  (paper Fig. 7c, single block → no page headers). Values exist for non-leaf children
-  too (averaged color) for LOD. Uniform solid subtrees collapse into coarse leaves.
-  `ax_octree_sample` decodes exactly like the GPU (used by tests; usable for picking).
-- `world/demo_scene.*`: TEMPORARY. 256³ terrain/pond/trees/ruin, spawn at (128, h+30, 244),
-  trees excluded within 40 voxels of spawn. Replace when scene hierarchy/ECS lands.
-- `world/world_renderer.*` (lib axiovox_world_renderer): node "world", per-device state
-  (SSBO, descriptor, pipeline) re-created on device switch. 96-byte push constants:
-  octree-space eye ([1,2]³), basis scaled by tan(fov/2)/aspect, pixel footprint × lod_bias,
-  sun, offsets, step budgets (768 primary / 384 shadow). Checks maxStorageBufferRange.
-- `shaders/world.frag`: Fig. 15 PUSH/ADVANCE/POP with s_max = 23, findMSB for POP,
-  LOD termination `tc_max * footprint >= scale_exp2`, entry-face normal, shadow ray,
-  hemisphere ambient, fog, sky. Step budget exhaustion = miss. Contours not implemented.
+- `core/input.*`: per-frame `mouse_dx/dy`; first sample after invalidation (lock change,
+  focus loss) yields no motion. `ax_input_mouse_delta` only when locked and not captured.
+- `core/window.*`: `ax_window_set_cursor_locked`; main locks when `!captured && focused &&
+  !iconified`. HUD icons skip hover/click while `pointer_locked`.
+- `renderer`: `ax_renderer_remove_node`, `ax_buffer_upload` (staging + barrier).
+- `world/camera.*`: right-handed Y-up, yaw 0 → -Z; W/S along view, A/D strafe, E/Q world
+  up/down, Shift x4; defaults fov 70°, 6 m/s, 0.0025 rad/px; dt clamped 0.1 s.
+- `world/octree.*`: input is `AxVoxelSource` (thread-safe SDF + color callbacks, extent,
+  depth, lipschitz). Surface-only (hollow shells). Split level 3 → 512 subtree tasks on
+  AxJobs (falls back inline when queue full/NULL), arenas merged with index rebasing, top
+  levels combined on owner thread; output bit-identical to serial (tested).
+  Cull: |f(center)| > L*0.866*s → empty. Leaf: 8 corners + center; valid if sign change
+  or a Newton-projected sample within 0.25 s; contour normal = corner gradient, range from
+  projected samples + 0.12 s margin; dropped if slab misses cube. Node contour: gradient at
+  center, range = extents of children's cube∩slab polytopes (vertex enumeration) + 0.01 s,
+  so every leaf polytope is inside all ancestor slabs. Slab stored only if it cuts the cube
+  (2*thick < 0.95 width). Encoding paper Fig. 4; normals scaled to max component 31.
+  Words: [desc 2w][lookup 1w][values][contours]; desc word1 = contour ptr<<8 | mask.
+  `ax_octree_sample(p world)` applies contours exactly like the GPU.
+- `world/demo_scene.*`: TEMPORARY. All components 1-Lipschitz: terrain heightfield
+  (max(H, water)) * 0.36 plus exact bounds above 10.5 m / below 5 m; foliage
+  max(k*(sphere+noise), sphere-A); capsules; ruin. Trees in 16x16 XZ buckets; unlisted
+  trees bounded by a 2 m cap. Color per leaf cell (tiny-voxel jitter, leaf ramp, water,
+  sand, slopes, flower specks). Built in main BEFORE window creation: with a window, the
+  blocked main thread gets the process throttled by macOS (13 s vs 2.1 s).
+- Contours are compile-time, default OFF: CMake option `AXIOVOX_WORLD_CONTOURS` →
+  `file(CONFIGURE)` writes `<build>/generated/world_config.h` (`AX_WORLD_CONTOURS 0|1`),
+  public include of axiovox_world and `#include`d by world.frag (glslc -I generated,
+  DEPENDS on the header so toggling rebuilds shaders). Off: builder skips leaf/node
+  contour fitting (leaves need a sign change), all contour masks zero, shader omits the
+  intersection. Runtime toggle command removed.
+- `world/world_renderer.*`: node "world", per-device SSBO/pipeline, 112-byte push
+  constants (eye in [1,2]^3, scaled basis, footprint, sun + shadow bias 0.75 voxel,
+  offsets, step budgets 1024/512, contour offset).
+- `shaders/world.frag`: Appendix A contour intersection (exact bitfield decode instead
+  of CUDA shift trick), hit normal tracked from whichever plane last raised t_min (root
+  entry, ADVANCE face, contour plane).
 
 ## Validation
 
-- Release build without warnings; all 9 CTests (new `world` test + GPU presentation/
-  runtime/live device switch with world node) passed. world/core/UI tests pass under ASan/UBSan.
-- World tests: camera axes/boost/clamps/capture/NaN, pointer invalidation, octree
-  empty/uniform/sparse round-trip, 128³ random grid with far pointers, demo spawn not solid.
-- Screenshots of the GPU window are blocked (no screen-recording permission). Instead, a
-  line-for-line C port of cast_ray rendered the demo octree (scratchpad only, not committed):
-  correct terrain/trees/ruin/pond/shadows, hits cross-checked against ax_octree_sample.
-- Demo build: 127k descriptors, ~5 MiB, ~64 ms Release. Validation layers not loaded
-  (bin links MoltenVK directly). Windows/Linux unverified.
+- Release: all 9 CTests passed (world test includes sphere/gyroid hole-free enclosure on
+  40k true surface points, off-surface exclusion, far pointers, parallel determinism, demo
+  scene). World tests pass under ASan/UBSan (~70 s).
+- GPU screenshots blocked (no screen-recording permission); a line-for-line C port of
+  the shader (scratchpad only) rendered spawn and contour on/off close-ups: smooth walls
+  and terrain with contours, cube staircases without, no holes. Minor stepping remains
+  at concave wall/ground junctions (single contour per voxel; paper notes sharp edges).
+- Contours OFF (default): 762k descriptors, 3.06M values, ~20 MiB, 1.7 s (4 workers); all 9
+  CTests pass. Contours ON verified in a scratch build (world tests pass, shader compiles).
+- Contours ON demo: 824k descriptors, 3.55M values, 3.55M contours, ~37 MiB, 2.1 s with 4 workers
+  (7.7 s single thread, 1.4 s with 8). Windows/Linux unverified.

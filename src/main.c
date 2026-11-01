@@ -12,6 +12,7 @@
 #include <GLFW/glfw3.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 typedef struct {
     AxConfig config;
     AxWindow window;
@@ -136,14 +137,17 @@ int main(int argc, char **argv)
     if (!ax_console_init(&app.console, &app.commands, &app.input, &events)) goto cleanup;
     app.jobs = ax_jobs_create((size_t)ax_config_get(&app.config, "jobs.workers")->value);
     if (!app.jobs) { ax_log(AX_LOG_ERROR, "Worker pool creation failed"); goto cleanup; }
+    struct timespec build_begin, build_end;
+    timespec_get(&build_begin, TIME_UTC);
+    if (!ax_demo_scene_build(&app.world, &app.camera, app.jobs)) { ax_log(AX_LOG_ERROR, "World generation failed"); goto cleanup; }
+    timespec_get(&build_end, TIME_UTC);
+    ax_log(AX_LOG_INFO, "World %u^3 over %.0f m: %u descriptors, %u far pointers, %u values, %u contours, %.1f KiB in %.0f ms",
+           app.world.size, (double)app.world.extent, app.world.descriptor_count, app.world.far_count, app.world.value_count, app.world.contour_count,
+           (double)app.world.word_count * sizeof(uint32_t) / 1024.0,
+           (double)(build_end.tv_sec - build_begin.tv_sec) * 1000.0 + (double)(build_end.tv_nsec - build_begin.tv_nsec) / 1e6);
     if (!ax_window_create(&app.window, &events, ax_config_get(&app.config, "window.width")->value, ax_config_get(&app.config, "window.height")->value)) goto cleanup;
     ax_window_set_input(&app.window, &app.input);
     if (!ax_renderer_create(&app.renderer, &app.window, &events, ax_config_get(&app.config, "renderer.device")->value)) goto cleanup;
-    double build_start = glfwGetTime();
-    if (!ax_demo_scene_build(&app.world, &app.camera)) { ax_log(AX_LOG_ERROR, "World generation failed"); goto cleanup; }
-    ax_log(AX_LOG_INFO, "World %u^3: %u descriptors, %u far pointers, %u values, %.1f KiB in %.0f ms",
-           app.world.size, app.world.descriptor_count, app.world.far_count, app.world.value_count,
-           (double)app.world.word_count * sizeof(uint32_t) / 1024.0, (glfwGetTime() - build_start) * 1000.0);
     if (!ax_world_renderer_create(&app.world_renderer, &app.renderer, &app.world, &app.camera)) { ax_log(AX_LOG_ERROR, "World renderer initialization failed"); goto cleanup; }
     if (!ax_ui_create(&app.ui, &app.renderer, &app.console)) { ax_log(AX_LOG_ERROR, "UI initialization failed"); goto cleanup; }
     if (!configure_hud(&app)) goto cleanup;

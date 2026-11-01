@@ -60,11 +60,18 @@ Custom SDK layouts can set `AXIOVOX_MOLTENVK_LIBRARY` (macOS) or
 
 The world is drawn by ray casting a sparse voxel octree on a single full-screen
 triangle (Laine & Karras, *Efficient Sparse Voxel Octrees*, NVR-2010-001): no
-triangle meshes. Until a scene hierarchy/ECS exists, `src/world/demo_scene.c`
-hardcodes a 256³ world (terrain, pond, trees, ruin) that is built at startup.
+triangle meshes. Voxels are plain cubes by default. The paper's contours are a
+compile-time option: configure with `-DAXIOVOX_WORLD_CONTOURS=ON` (generates
+`AX_WORLD_CONTOURS 1` in `world_config.h`, shared by the builder and
+`shaders/world.frag`) and each voxel's shape becomes its cube intersected with its
+own and all ancestor contour slabs, keeping surfaces smooth when voxels are larger
+than a pixel. Until a scene hierarchy/ECS exists,
+`src/world/demo_scene.c` hardcodes a 64 m signed-distance world (terrain, pond,
+trees, ruin) voxelized at 1024³ (about 6 cm voxels) on the worker pool before the
+window opens (about 2 s with 4 workers).
 
-Free-flight camera: mouse looks, W/S move along the view direction, A/D strafe,
-E/Q rise/fall along world up, Shift moves 4x faster. The cursor is locked and
+Free-flight camera (6 m/s): mouse looks, W/S move along the view direction, A/D
+strafe, E/Q rise/fall along world up, Shift moves 4x faster. The cursor is locked and
 hidden during gameplay; opening the console, pausing, or losing focus releases it.
 HUD icons are pointer targets only while the cursor is free.
 
@@ -211,10 +218,13 @@ narrow viewports, the centered hotbar shrinks to keep clear of the icon strip.
 - `world/`: GPU-independent camera controller, ESVO octree builder/point query, and
   the temporary demo scene (`axiovox_world`); the `world` render node
   (`axiovox_world_renderer`) uploads the octree per device and ray casts it in
-  `shaders/world.frag`. Octree words: 64-bit child descriptors (15-bit child
-  pointer, far bit, valid/non-leaf masks, reserved contour word), one attachment
-  lookup entry per descriptor, then ABGR values for every valid child. Non-leaf
-  values are averaged colors for level-of-detail termination by pixel footprint.
+  `shaders/world.frag`. The builder samples a signed-distance source
+  (`AxVoxelSource`) in parallel and stores surface voxels only. Octree words:
+  64-bit child descriptors (child pointer, far bit, valid/non-leaf masks, contour
+  pointer/mask), one attachment lookup entry per descriptor, ABGR values for every
+  valid child (non-leaf values are averaged colors for level-of-detail termination),
+  then 32-bit contours. Leaf contours enclose the sampled surface; parent contours
+  enclose their children's cube-slab shapes, so ancestors never cut holes.
 - `ui/`: console state/editor, GPU-independent draw list and HUD layout, and a
   separate Vulkan UI node. The R8 font atlas uses
   the Causality stb_truetype approach and embedded Departure Mono Nerd Font Mono, with

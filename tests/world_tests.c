@@ -2,6 +2,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #define CHECK(condition) do { if (!(condition)) { fprintf(stderr, "Failed at line %d: %s\n", __LINE__, #condition); return false; } } while (0)
 /** Compares floats within a tolerance. */
 static bool near(float a, float b) { return fabsf(a - b) < 1e-4f; }
@@ -21,24 +22,24 @@ static bool camera_tests(void)
 
     ax_input_key(&input, AX_KEY_W, true, false, 0);
     ax_camera_update(&camera, &input, 0.05);
-    CHECK(near(camera.position[2], -1.2f) && near(camera.position[0], 0.0f));
+    CHECK(near(camera.position[2], -0.3f) && near(camera.position[0], 0.0f));
     ax_camera_update(&camera, &input, 10.0);
-    CHECK(near(camera.position[2], -3.6f));
+    CHECK(near(camera.position[2], -0.9f));
     ax_camera_update(&camera, &input, NAN);
     ax_camera_update(&camera, &input, -1.0);
-    CHECK(near(camera.position[2], -3.6f));
+    CHECK(near(camera.position[2], -0.9f));
     ax_input_key(&input, AX_KEY_W, false, false, 0);
 
     ax_input_key(&input, AX_KEY_E, true, false, 0);
     ax_input_key(&input, AX_KEY_LEFT_SHIFT, true, false, 0);
     ax_camera_update(&camera, &input, 0.1);
-    CHECK(near(camera.position[1], 9.6f));
+    CHECK(near(camera.position[1], 2.4f));
     ax_input_key(&input, AX_KEY_LEFT_SHIFT, false, false, 0);
     ax_input_key(&input, AX_KEY_D, true, false, 0);
     float before[3] = {camera.position[0], camera.position[1], camera.position[2]};
     ax_camera_update(&camera, &input, 0.1);
     float moved = sqrtf(powf(camera.position[0] - before[0], 2) + powf(camera.position[1] - before[1], 2));
-    CHECK(near(moved, 2.4f));
+    CHECK(near(moved, 0.6f));
     ax_input_key(&input, AX_KEY_D, false, false, 0);
     ax_input_key(&input, AX_KEY_E, false, false, 0);
 
@@ -72,81 +73,148 @@ static bool camera_tests(void)
     CHECK(camera.pitch >= -1.5708f && camera.pitch <= 1.5708f);
     return true;
 }
-/** Checks every grid cell against the encoded octree's point query. */
-static bool matches(const AxOctree *octree, const AxVoxelGrid *grid)
+typedef struct { float center[3], radius; } Sphere;
+/** Exact sphere distance. */
+static float sphere_distance(const void *user, const float p[3])
 {
-    for (uint32_t z = 0; z < grid->size; ++z)
-        for (uint32_t y = 0; y < grid->size; ++y)
-            for (uint32_t x = 0; x < grid->size; ++x) {
-                uint8_t material = ax_voxel_grid_get(grid, x, y, z);
-                uint32_t color = 0;
-                bool solid = ax_octree_sample(octree, x, y, z, &color);
-                if (solid != (material != 0) || (solid && color != (grid->palette[material] | 0xff000000u))) {
-                    fprintf(stderr, "Mismatch at %u %u %u\n", x, y, z);
-                    return false;
-                }
-            }
-    return true;
+    const Sphere *s = user;
+    float d[3] = {p[0] - s->center[0], p[1] - s->center[1], p[2] - s->center[2]};
+    return sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) - s->radius;
 }
-/** Verifies empty, uniform, sparse, and far-pointer layouts round-trip exactly. */
-static bool octree_tests(void)
+/** Gyroid surface scaled to stay 1-Lipschitz; fills space with surface to force far pointers. */
+static float gyroid_distance(const void *user, const float p[3])
 {
-    AxVoxelGrid grid;
-    AxOctree octree;
-    CHECK(!ax_voxel_grid_create(&grid, 0) && !ax_voxel_grid_create(&grid, 1) && !ax_voxel_grid_create(&grid, 12));
-    CHECK(!ax_voxel_grid_create(&grid, 1u << 17));
-    CHECK(!ax_octree_build(&octree, NULL) && !octree.words);
-    ax_octree_destroy(&octree);
-    ax_voxel_grid_destroy(NULL);
-
-    CHECK(ax_voxel_grid_create(&grid, 8));
-    for (int i = 1; i < 256; ++i) grid.palette[i] = 0xff000000u | (uint32_t)i * 0x010203u;
-    CHECK(ax_octree_build(&octree, &grid));
-    CHECK(octree.descriptor_count == 1 && !ax_octree_sample(&octree, 3, 3, 3, NULL));
-    ax_octree_destroy(&octree);
-    for (int z = 0; z < 8; ++z) for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) ax_voxel_grid_set(&grid, x, y, z, 4);
-    CHECK(ax_octree_build(&octree, &grid));
-    CHECK(octree.descriptor_count == 1 && octree.value_count == 8 && matches(&octree, &grid));
-    ax_octree_destroy(&octree);
-    ax_voxel_grid_set(&grid, 5, 6, 7, 9);
-    ax_voxel_grid_set(&grid, 0, 0, 0, 0);
-    ax_voxel_grid_set(&grid, -1, 0, 99, 9);
-    CHECK(ax_voxel_grid_get(&grid, -1, 0, 0) == 0 && ax_voxel_grid_get(&grid, 8, 0, 0) == 0);
-    CHECK(ax_octree_build(&octree, &grid));
-    CHECK(matches(&octree, &grid) && !ax_octree_sample(&octree, -1, 0, 0, NULL) && !ax_octree_sample(&octree, 0, 8, 0, NULL));
-    ax_octree_destroy(&octree);
-    ax_voxel_grid_destroy(&grid);
-
-    CHECK(ax_voxel_grid_create(&grid, 128));
-    for (int i = 1; i < 256; ++i) grid.palette[i] = 0xff000000u | (uint32_t)i * 0x00030507u;
-    uint32_t state = 0x12345678u;
-    for (uint32_t z = 0; z < 128; ++z) for (uint32_t y = 0; y < 128; ++y) for (uint32_t x = 0; x < 128; ++x) {
-        state = state * 1664525u + 1013904223u;
-        if ((state >> 24) < 90) ax_voxel_grid_set(&grid, x, y, z, (uint8_t)(1 + (state >> 8) % 200));
+    (void)user;
+    const float k = 0.9f;
+    return (sinf(p[0] * k) * cosf(p[1] * k) + sinf(p[1] * k) * cosf(p[2] * k) + sinf(p[2] * k) * cosf(p[0] * k)) / (k * 2.5f);
+}
+/** Distance with no surface inside the volume. */
+static float far_distance(const void *user, const float p[3]) { (void)user; (void)p; return 1000.0f; }
+/** Constant test color. */
+static uint32_t test_color(const void *user, const float p[3], const float n[3], const int32_t cell[3])
+{
+    (void)user; (void)p; (void)n; (void)cell;
+    return 0xff3366ccu;
+}
+/** Deterministic pseudo-random float in [0, 1). */
+static float next_random(uint32_t *state)
+{
+    *state = *state * 1664525u + 1013904223u;
+    return (float)(*state >> 8) / 16777216.0f;
+}
+/** Accepts a surface point when the octree contains it within a tiny tolerance along the normal. */
+static bool encloses(const AxOctree *octree, const float p[3], const float n[3], float voxel)
+{
+    for (int step = -1; step <= 1; ++step) {
+        float q[3] = {p[0] + n[0] * voxel * 0.01f * (float)step, p[1] + n[1] * voxel * 0.01f * (float)step, p[2] + n[2] * voxel * 0.01f * (float)step};
+        if (ax_octree_sample(octree, q, NULL)) return true;
     }
-    CHECK(ax_octree_build(&octree, &grid));
-    CHECK(octree.far_count > 0 && octree.depth == 7);
-    CHECK(matches(&octree, &grid));
-    ax_octree_destroy(&octree);
-    ax_voxel_grid_destroy(&grid);
+    return false;
+}
+/** Verifies a sphere is enclosed without holes, excludes off-surface points, and builds identically in parallel. */
+static bool sphere_tests(AxJobs *jobs)
+{
+    Sphere sphere = {{8.0f, 8.3f, 7.7f}, 5.1f};
+    AxVoxelSource source = {sphere_distance, test_color, &sphere, 16.0f, 6, 1.0f};
+    AxOctree serial, parallel;
+    CHECK(ax_octree_build(&serial, &source, NULL));
+    CHECK(ax_octree_build(&parallel, &source, jobs));
+    CHECK(serial.word_count == parallel.word_count && !memcmp(serial.words, parallel.words, serial.word_count * sizeof(uint32_t)));
+    CHECK((AX_WORLD_CONTOURS ? serial.contour_count > serial.value_count / 2 : serial.contour_count == 0) && serial.depth == 6 && serial.extent == 16.0f);
+    float voxel = 16.0f / 64.0f;
+    uint32_t state = 7u, misses = 0;
+    for (int i = 0; i < 20000; ++i) {
+        float u[3] = {next_random(&state) * 2 - 1, next_random(&state) * 2 - 1, next_random(&state) * 2 - 1};
+        float length = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+        if (length < 0.1f || length > 1.0f) continue;
+        for (int a = 0; a < 3; ++a) u[a] /= length;
+        float p[3], outside[3], inside[3];
+        for (int a = 0; a < 3; ++a) {
+            p[a] = sphere.center[a] + u[a] * sphere.radius;
+            outside[a] = p[a] + u[a] * voxel * 2.0f;
+            inside[a] = p[a] - u[a] * voxel * 2.0f;
+        }
+        uint32_t color = 0;
+        if (!encloses(&serial, p, u, voxel)) ++misses;
+        else CHECK(ax_octree_sample(&serial, p, &color) ? color == 0xff3366ccu : true);
+        CHECK(!ax_octree_sample(&serial, outside, NULL) && !ax_octree_sample(&serial, inside, NULL));
+    }
+    if (misses) fprintf(stderr, "sphere enclosure misses: %u\n", misses);
+    CHECK(misses == 0);
+    CHECK(!ax_octree_sample(&serial, (float[3]){-1, 8, 8}, NULL) && !ax_octree_sample(&serial, (float[3]){8, 16, 8}, NULL));
+    CHECK(!ax_octree_sample(&serial, (float[3]){NAN, 8, 8}, NULL));
+    ax_octree_destroy(&serial);
+    ax_octree_destroy(&parallel);
     return true;
 }
-/** Builds the temporary demo world and checks the spawn sits above the surface inside the octree. */
-static bool scene_tests(void)
+/** Verifies invalid sources, empty volumes, and a dense surface that requires far pointers. */
+static bool octree_tests(AxJobs *jobs)
+{
+    AxOctree octree;
+    AxVoxelSource source = {far_distance, test_color, NULL, 16.0f, 4, 1.0f};
+    CHECK(!ax_octree_build(&octree, NULL, NULL) && !octree.words);
+    AxVoxelSource bad = source; bad.depth = 0;
+    CHECK(!ax_octree_build(&octree, &bad, NULL));
+    bad.depth = AX_OCTREE_MAX_DEPTH + 1;
+    CHECK(!ax_octree_build(&octree, &bad, NULL));
+    bad = source; bad.extent = 0.0f;
+    CHECK(!ax_octree_build(&octree, &bad, NULL));
+    bad = source; bad.lipschitz = NAN;
+    CHECK(!ax_octree_build(&octree, &bad, NULL));
+    bad = source; bad.color = NULL;
+    CHECK(!ax_octree_build(&octree, &bad, NULL));
+    ax_octree_destroy(NULL);
+    CHECK(ax_octree_build(&octree, &source, jobs));
+    CHECK(octree.descriptor_count == 1 && !ax_octree_sample(&octree, (float[3]){3, 3, 3}, NULL));
+    ax_octree_destroy(&octree);
+
+    AxVoxelSource gyroid = {gyroid_distance, test_color, NULL, 64.0f, 7, 1.0f};
+    CHECK(ax_octree_build(&octree, &gyroid, jobs));
+    CHECK(octree.far_count > 0 && (AX_WORLD_CONTOURS ? octree.contour_count > 0 : octree.contour_count == 0));
+    float voxel = 64.0f / 128.0f;
+    uint32_t state = 11u, misses = 0, tested = 0;
+    for (int i = 0; i < 20000; ++i) {
+        float a[3] = {next_random(&state) * 63.0f + 0.5f, next_random(&state) * 63.0f + 0.5f, next_random(&state) * 63.0f + 0.5f};
+        float b[3] = {a[0] + next_random(&state) * 1.6f - 0.8f, a[1] + next_random(&state) * 1.6f - 0.8f, a[2] + next_random(&state) * 1.6f - 0.8f};
+        float fa = gyroid_distance(NULL, a), fb = gyroid_distance(NULL, b);
+        if ((fa < 0) == (fb < 0) || b[0] <= 0 || b[1] <= 0 || b[2] <= 0 || b[0] >= 64 || b[1] >= 64 || b[2] >= 64) continue;
+        for (int iteration = 0; iteration < 40; ++iteration) {
+            float m[3] = {(a[0] + b[0]) * 0.5f, (a[1] + b[1]) * 0.5f, (a[2] + b[2]) * 0.5f};
+            if ((gyroid_distance(NULL, m) < 0) == (fa < 0)) { a[0] = m[0]; a[1] = m[1]; a[2] = m[2]; }
+            else { b[0] = m[0]; b[1] = m[1]; b[2] = m[2]; }
+        }
+        float n[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, length = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (length > 0) for (int k = 0; k < 3; ++k) n[k] /= length;
+        ++tested;
+        if (!encloses(&octree, a, n, voxel)) ++misses;
+    }
+    if (misses) fprintf(stderr, "gyroid enclosure misses: %u of %u\n", misses, tested);
+    CHECK(tested > 1000 && misses == 0);
+    ax_octree_destroy(&octree);
+    return true;
+}
+/** Builds the temporary demo world and checks the spawn is clear with ground below it. */
+static bool scene_tests(AxJobs *jobs)
 {
     AxOctree octree;
     AxCamera camera;
-    CHECK(!ax_demo_scene_build(NULL, &camera));
-    CHECK(ax_demo_scene_build(&octree, &camera));
-    CHECK(octree.size == 256 && octree.descriptor_count > 1);
-    CHECK(camera.position[1] > 0 && camera.position[1] < 256);
-    CHECK(!ax_octree_sample(&octree, (int64_t)camera.position[0], (int64_t)camera.position[1], (int64_t)camera.position[2], NULL));
-    CHECK(ax_octree_sample(&octree, 128, 0, 128, NULL));
+    CHECK(!ax_demo_scene_build(NULL, &camera, jobs));
+    CHECK(ax_demo_scene_build(&octree, &camera, jobs));
+    CHECK(octree.size == 1024 && octree.extent == 64.0f && octree.descriptor_count > 1 && (AX_WORLD_CONTOURS ? octree.contour_count > 0 : octree.contour_count == 0));
+    CHECK(!ax_octree_sample(&octree, camera.position, NULL));
+    bool ground = false;
+    for (float y = camera.position[1]; y > 0.0f && !ground; y -= 0.01f)
+        ground = ax_octree_sample(&octree, (float[3]){camera.position[0], y, camera.position[2]}, NULL);
+    CHECK(ground);
     ax_octree_destroy(&octree);
     return true;
 }
-/** Runs GPU-independent camera, input, octree, and scene tests. */
+/** Runs GPU-independent camera, input, octree enclosure, parallel determinism, and scene tests. */
 int main(void)
 {
-    return camera_tests() && octree_tests() && scene_tests() ? EXIT_SUCCESS : EXIT_FAILURE;
+    AxJobs *jobs = ax_jobs_create(4);
+    if (!jobs) return EXIT_FAILURE;
+    bool passed = camera_tests() && octree_tests(jobs) && sphere_tests(jobs) && scene_tests(jobs);
+    ax_jobs_destroy(jobs);
+    return passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }

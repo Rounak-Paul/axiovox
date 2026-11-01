@@ -1,6 +1,10 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "world_config.h"
 // Sparse voxel octree ray caster after Laine & Karras, "Efficient Sparse Voxel Octrees" (NVR-2010-001), Figure 15.
-// The octree occupies [1, 2]^3 so cube positions map directly onto float mantissa bits; contours are not used yet.
+// The octree occupies [1, 2]^3 so cube positions map directly onto float mantissa bits. Voxel shapes are the
+// intersection of their cube with their own and all ancestor contour slabs (paper Sections 5.2-5.3, Appendix A)
+// when built with AX_WORLD_CONTOURS; otherwise voxels are plain cubes.
 layout(location=0) in vec2 ndc;
 layout(location=0) out vec4 out_color;
 layout(std430, set=0, binding=0) readonly buffer Octree { uint words[]; } octree;
@@ -9,8 +13,9 @@ layout(push_constant) uniform View {
     vec4 forward;  // xyz: unit view direction; w: world units per octree unit
     vec4 right;    // xyz: right scaled by tan(fov/2) * aspect
     vec4 up;       // xyz: up scaled by tan(fov/2)
-    vec4 sun;      // xyz: unit direction toward the sun
+    vec4 sun;      // xyz: unit direction toward the sun; w: shadow ray origin offset in octree units
     uvec4 info;    // x: lookup offset, y: value offset, z: primary step budget, w: shadow step budget
+    uvec4 extra;   // x: contour offset
 } view;
 
 const int S_MAX = 23;
@@ -46,10 +51,16 @@ Hit cast_ray(vec3 p, vec3 d, float footprint, uint max_steps)
     float t_min = max(max(2.0 * coef.x - bias.x, 2.0 * coef.y - bias.y), 2.0 * coef.z - bias.z);
     float t_max = min(min(coef.x - bias.x, coef.y - bias.y), coef.z - bias.z);
     float h = t_max;
+    vec3 facing = vec3((octant & 1u) != 0u ? 1.0 : -1.0, (octant & 2u) != 0u ? 1.0 : -1.0, (octant & 4u) != 0u ? 1.0 : -1.0);
+    vec3 entry = 2.0 * coef - bias;
+    vec3 normal = entry.x >= entry.y && entry.x >= entry.z ? vec3(facing.x, 0.0, 0.0)
+                : entry.y >= entry.z ? vec3(0.0, facing.y, 0.0) : vec3(0.0, 0.0, facing.z);
+    if (t_min <= 0.0) normal = -normalize(d);
     t_min = max(t_min, 0.0);
 
     uint parent = 0u;
     uint descriptor = 0u;
+    uint contour_word = 0u;
     uint idx = 0u;
     vec3 pos = vec3(1.0);
     int scale = S_MAX - 1;
@@ -61,7 +72,12 @@ Hit cast_ray(vec3 p, vec3 d, float footprint, uint max_steps)
     uint steps = 0u;
     while (scale < S_MAX) {
         if (++steps > max_steps) return hit;
-        if (descriptor == 0u) descriptor = octree.words[parent * 2u];
+        if (descriptor == 0u) {
+            descriptor = octree.words[parent * 2u];
+#if AX_WORLD_CONTOURS
+            contour_word = octree.words[parent * 2u + 1u];
+#endif
+        }
 
         vec3 corner = pos * coef - bias;
         float tc_max = min(min(corner.x, corner.y), corner.z);
@@ -74,6 +90,29 @@ Hit cast_ray(vec3 p, vec3 d, float footprint, uint max_steps)
             float tv_max = min(t_max, tc_max);
             float half_size = scale_exp2 * 0.5;
             vec3 center = half_size * coef + corner;
+
+#if AX_WORLD_CONTOURS
+            // Intersect the active span with the voxel's contour slab.
+            uint contour_mask = contour_word << (idx ^ octant);
+            if ((contour_mask & 0x80u) != 0u) {
+                uint value = octree.words[view.extra.x + (contour_word >> 8) + uint(bitCount(contour_mask & 0x7Fu))];
+                vec3 cn = vec3(bitfieldExtract(int(value), 12, 6), bitfieldExtract(int(value), 6, 6), bitfieldExtract(int(value), 0, 6)) / 32.0;
+                float cpos = float(bitfieldExtract(int(value), 18, 7)) * scale_exp2 * (1.5 / 64.0);
+                float cthick = float(value >> 25) * scale_exp2 * (0.75 / 64.0);
+                vec3 cdir = cn * d;
+                float denom = cdir.x + cdir.y + cdir.z;
+                if (abs(denom) < 1e-20) denom = denom < 0.0 ? -1e-20 : 1e-20;
+                float tcoef = 1.0 / denom;
+                float tavg = dot(center, cdir) + cpos;
+                float tdiff = abs(cthick * tcoef);
+                float slab_min = tcoef * tavg - tdiff;
+                if (slab_min > t_min) {
+                    t_min = slab_min;
+                    normal = normalize(denom < 0.0 ? cn : -cn);
+                }
+                tv_max = min(tv_max, tcoef * tavg + tdiff);
+            }
+#endif
 
             if (t_min <= tv_max) {
                 if ((child_masks & 0x0080u) == 0u) break;
@@ -108,6 +147,8 @@ Hit cast_ray(vec3 p, vec3 d, float footprint, uint max_steps)
         if (corner.x <= tc_max) { step_mask ^= 1u; pos.x -= scale_exp2; }
         if (corner.y <= tc_max) { step_mask ^= 2u; pos.y -= scale_exp2; }
         if (corner.z <= tc_max) { step_mask ^= 4u; pos.z -= scale_exp2; }
+        if (tc_max > t_min) normal = (step_mask & 1u) != 0u ? vec3(facing.x, 0.0, 0.0)
+                                   : (step_mask & 2u) != 0u ? vec3(0.0, facing.y, 0.0) : vec3(0.0, 0.0, facing.z);
         t_min = tc_max;
         idx ^= step_mask;
 
@@ -134,15 +175,8 @@ Hit cast_ray(vec3 p, vec3 d, float footprint, uint max_steps)
     }
     if (scale >= S_MAX) return hit;
 
-    // The entry face is the mirrored cube's upper plane with the latest crossing time.
-    vec3 entry = (pos + scale_exp2) * coef - bias;
-    vec3 facing = vec3((octant & 1u) != 0u ? 1.0 : -1.0, (octant & 2u) != 0u ? 1.0 : -1.0, (octant & 4u) != 0u ? 1.0 : -1.0);
-    if (t_min <= 0.0) hit.normal = -normalize(d);
-    else if (entry.x >= entry.y && entry.x >= entry.z) hit.normal = vec3(facing.x, 0.0, 0.0);
-    else if (entry.y >= entry.z) hit.normal = vec3(0.0, facing.y, 0.0);
-    else hit.normal = vec3(0.0, 0.0, facing.z);
-
     hit.found = true;
+    hit.normal = normal;
     hit.t = t_min;
     hit.parent = parent;
     hit.slot = idx ^ octant ^ 7u;
@@ -180,13 +214,13 @@ void main() {
         vec3 n = hit.normal;
         float diffuse = max(dot(n, view.sun.xyz), 0.0);
         if (diffuse > 0.0) {
-            Hit shadow = cast_ray(point + n * 1e-5, view.sun.xyz, 0.0, view.info.w);
+            Hit shadow = cast_ray(point + n * view.sun.w, view.sun.xyz, 0.0, view.info.w);
             if (shadow.found) diffuse = 0.0;
         }
         vec3 ambient = mix(vec3(0.22, 0.2, 0.24), vec3(0.42, 0.5, 0.62), n.y * 0.5 + 0.5);
         color = albedo * (ambient + vec3(1.0, 0.94, 0.84) * diffuse * 1.15);
         float distance = hit.t * view.forward.w;
-        color = mix(color, pow(background, vec3(2.2)), 1.0 - exp(-distance * 0.0035));
+        color = mix(color, pow(background, vec3(2.2)), 1.0 - exp(-distance * 0.012));
         color = pow(color, vec3(1.0 / 2.2));
     }
     out_color = vec4(clamp(color, 0.0, 1.0), 1.0);

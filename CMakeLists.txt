@@ -36,13 +36,20 @@ target_link_libraries(axiovox_core PUBLIC Threads::Threads)
 
 set(generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${generated_dir}")
+option(AXIOVOX_WORLD_CONTOURS "Build and ray cast ESVO voxel contours" OFF)
+if(AXIOVOX_WORLD_CONTOURS)
+    set(AX_WORLD_CONTOURS 1)
+else()
+    set(AX_WORLD_CONTOURS 0)
+endif()
+file(CONFIGURE OUTPUT "${generated_dir}/world_config.h" CONTENT "#ifndef AX_WORLD_CONFIG_H\n#define AX_WORLD_CONFIG_H\n#define AX_WORLD_CONTOURS @AX_WORLD_CONTOURS@\n#endif\n" @ONLY)
 foreach(shader IN ITEMS ui.vert ui.frag world.vert world.frag)
     add_custom_command(
         OUTPUT "${generated_dir}/${shader}.inc"
-        COMMAND Vulkan::glslc --target-env=vulkan1.2 -O -mfmt=c
+        COMMAND Vulkan::glslc --target-env=vulkan1.2 -O -mfmt=c -I "${generated_dir}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}"
                 -o "${generated_dir}/${shader}.inc"
-        DEPENDS "shaders/${shader}"
+        DEPENDS "shaders/${shader}" "${generated_dir}/world_config.h"
         VERBATIM
     )
 endforeach()
@@ -79,6 +86,7 @@ target_include_directories(axiovox_ui PRIVATE "${generated_dir}")
 target_link_libraries(axiovox_ui PUBLIC axiovox_renderer axiovox_ui_layout)
 
 add_library(axiovox_world STATIC src/world/camera.c src/world/octree.c src/world/demo_scene.c)
+target_include_directories(axiovox_world PUBLIC "${generated_dir}")
 target_link_libraries(axiovox_world PUBLIC axiovox_core)
 if(UNIX)
     target_link_libraries(axiovox_world PUBLIC m)
