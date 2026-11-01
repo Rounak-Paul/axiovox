@@ -1,17 +1,20 @@
 #pragma once
 #include "coordinates.h"
+#include "terrain.h"
 #include <stddef.h>
 #include "core/event.h"
 #define AX_SCENE_MAX_PLANETS 4096u
 #define AX_PLANET_MAX_EDITS 1000000u
 /** Stable identity; zero is invalid. Planet positions are relative to their owning star system. */
 typedef uint64_t AxPlanetId;
-typedef enum { AX_MATERIAL_AIR, AX_MATERIAL_ROCK, AX_MATERIAL_SOIL, AX_MATERIAL_GRASS, AX_MATERIAL_BUILDING, AX_MATERIAL_COUNT } AxMaterial;
+typedef enum { AX_MATERIAL_AIR, AX_MATERIAL_ROCK, AX_MATERIAL_SOIL, AX_MATERIAL_GRASS, AX_MATERIAL_BUILDING, AX_MATERIAL_SAND, AX_MATERIAL_SNOW, AX_MATERIAL_COUNT } AxMaterial;
 typedef struct {
     AxPlanetId id;
     uint64_t seed;
     double center[3], radius, terrain_height, terrain_frequency;
     AxMaterial surface_material;
+    AxTerrainKind terrain_kind;
+    double surface_gravity, cave_depth;
 } AxPlanetDesc;
 typedef enum { AX_BRUSH_SPHERE, AX_BRUSH_BOX } AxBrushShape;
 /** Ordered solid CSG operation. Half extents are meters; sphere uses half_extent[0]. */
@@ -26,6 +29,7 @@ typedef struct AxPlanet AxPlanet;
 typedef struct {
     AxPlanet **planets;
     size_t count, capacity;
+    uint64_t epoch;
     AxEvents *events;
     bool notifying;
 } AxScene;
@@ -60,3 +64,12 @@ const char *ax_planet_name(AxPlanetId id);
 
 /** Copies all planets/edits transactionally into an independent snapshot, without event subscriptions. */
 bool ax_scene_clone(const AxScene *scene, AxScene *copy);
+
+/** Bounds density throughout a cube conservatively, including procedural caves and saved edits. */
+bool ax_planet_density_bounds(const AxPlanet *planet,const AxPosition *origin,double extent,double *minimum,double *maximum);
+
+/** Returns unedited radial terrain displacement at a planet-local position. */
+double ax_planet_terrain_height(const AxPlanet *planet,const double position[3]);
+
+/** Resolves the material of an extracted surface without classifying coarse interpolation error as buried rock. */
+AxMaterial ax_planet_surface_material(const AxPlanet *planet,const AxPosition *position,const double normal[3]);

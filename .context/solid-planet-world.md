@@ -25,10 +25,10 @@ subscriptions, allowing immutable worker sampling while the owner thread edits.
 
 ## Persistence and defaults
 
-AXSCENE version2 text stores recipes and edits with exact hexadecimal floats, still
-reads version1. Atomic save through core/files; bounded/range-checked parsing rejects
+AXSCENE version3 text stores recipes and edits with exact hexadecimal floats, still
+reads versions1/2 preserving their wave terrain. Generator kind, cave depth and surface gravity are persisted. Atomic save through core/files; bounded/range-checked parsing rejects
 duplicates, malformed/truncated data and overflow transactionally. Render caches and
-camera pose are not persisted. Load emits a reset notification (planet0).
+camera pose are not persisted. Load emits a reset notification (planet0) and advances the runtime cache epoch.
 
 Terra id1 seed42 radius1,000 km at0. Luna id2 seed917 radius270 km at
 (1200,1800,-2400) km, static initial placement. Names correspond to these built-in IDs.
@@ -41,5 +41,6 @@ Brushes act ahead of the camera on the nearest body, independent of its referenc
 
 See `triangle-terrain-refactor.md`. Solid CSG is authoritative; extracted triangles
 are disposable render assets. Existing save semantics are preserved by the refactor.
-Remaining: spatial edit indexing/compaction, character collision/gravity, orbital
+Current terrain/gravity/optimizer details: `planet-terrain-gravity-optimization.md`.
+Remaining: spatial edit indexing/compaction, character collision, orbital
 motion, galaxy sectors, camera persistence, and richer independently oriented buildings.

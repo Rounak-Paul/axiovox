@@ -63,7 +63,16 @@ frame-time claim. No commits or pushes.
 ## Explicit remaining limits
 
 Publishing still performs a packed vertex/index upload and GPU drain. Spatial seams
-are stitched, but temporal LOD changes can pop. No spatial edit index or general mesh
-simplifier yet. Directional shadows cover a local volume, not whole-system eclipses.
-Gravity/collision and orbital simulation remain separate gameplay work. No universal
+are stitched, but temporal LOD changes can pop. Mesh simplification is now implemented; see `planet-terrain-gravity-optimization.md`.
+Spatial edit indexing remains future work. Directional shadows cover a local volume, not whole-system eclipses.
+Gravity-aware flight is now implemented; character collision and orbital simulation remain separate gameplay work. No universal
 frame-time or production-world performance claim is made from fixture/startup checks.
+
+The original startup triangle figures above describe the pre-terrain baseline. Current
+terrain/optimization measurements live in `planet-terrain-gravity-optimization.md`.
+Normals now interpolate cached density-halo gradients; exposed material lookup no
+longer Newton-projects coarse interpolation error into buried rock classifications.
+
+Streaming now parallelizes changed regions and trims finer-covered mesh cells before
+simplification. See `planet-terrain-gravity-optimization.md` for the active-boundary
+constraint, scene reload epochs, surface material semantics, noise and gravity fields.

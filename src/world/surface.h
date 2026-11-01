@@ -1,20 +1,16 @@
 #pragma once
 #include "scene.h"
+#include "mesh.h"
 #define AX_SURFACE_CELLS 64u
-/** Indexed surface vertex in region-local meters; color is packed ABGR. */
-typedef struct { float position[3], normal[3]; uint32_t color; } AxSurfaceVertex;
-/** Disposable indexed mesh, independent of the authoritative volume. */
-typedef struct {
-    AxSurfaceVertex *vertices;
-    uint32_t *indices;
-    size_t vertex_count, index_count;
-} AxSurfaceMesh;
 /** Immutable surface region. Non-root regions include transition faces to the next 2:1 level. */
 typedef struct {
     AxSurfaceMesh mesh;
     AxPlanetId planet;
-    AxPosition origin;
+    AxPosition origin,exclusion_origin;
+    float exclusion_extent;
     uint64_t revision;
+    size_t source_triangles,visible_triangles;
+    float simplification_error;
     float extent;
     uint32_t cells;
     bool transitions;

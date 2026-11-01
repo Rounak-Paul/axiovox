@@ -10,6 +10,7 @@ typedef struct {
     AxPosition view_origin;
     double frame_center[3];
     float local_up[3], altitude, atmosphere_height, sun[3];
+    bool shadows_enabled;
 } AxWorldRenderer;
 /** Uploads triangle geometry and registers the world node; camera and geometry must outlive registration. */
 bool ax_world_renderer_create(AxWorldRenderer *world, AxRenderer *renderer, const AxWorldGeometry *geometry, const AxCamera *camera);

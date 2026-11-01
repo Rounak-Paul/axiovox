@@ -12,9 +12,9 @@ static bool camera_tests(void)
     AxEvents events = {0};
     AxInput input = {.events = &events};
     AxCamera camera;
-    ax_camera_init(&camera, NULL, 0.0f, 10.0f);
+    ax_camera_init(&camera, NULL, 0.0f, 10.0f,NULL);
     CHECK(camera.pitch < 1.5708f && camera.pitch > 1.56f);
-    ax_camera_init(&camera, (float[3]){0, 0, 0}, NAN, NAN);
+    ax_camera_init(&camera, (float[3]){0, 0, 0}, NAN, NAN,NULL);
     CHECK(camera.yaw == 0.0f && camera.pitch == 0.0f);
     float forward[3], right[3], up[3];
     ax_camera_basis(&camera, forward, right, up);

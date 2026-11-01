@@ -8,6 +8,7 @@ typedef struct AxStreamTask AxStreamTask;
 typedef struct {
     AxSurfaceRegion regions[AX_WORLD_MAX_REGIONS];
     size_t count;
+    uint64_t epoch;
     AxStreamTask *task;
     bool dirty, failed;
 } AxWorldStream;

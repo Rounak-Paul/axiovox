@@ -258,6 +258,7 @@ static View view_constants(const AxWorldRenderer *world,VkExtent2D extent)
     view.light_up[2]=-world->sun[1]*view.light_right[0];
     view.light_right[3]=AX_SHADOW_RANGE;
     view.info[1]=(uint32_t)world->geometry->count;
+    view.info[3]=world->shadows_enabled ? 1u : 0u;
     return view;
 }
 /** Records an explicit image barrier between an attachment and shader reads. */
@@ -308,7 +309,7 @@ static bool prepass(const AxRenderFrame *frame,void *user)
         .layerCount=1,.pDepthAttachment=&depth};
     frame->begin_rendering(frame->command,&rendering);
     bind(frame,gpu,gpu->shadow_pipeline,(VkExtent2D){AX_SHADOW_SIZE,AX_SHADOW_SIZE});
-    view.info[2]=1; draw_meshes(frame,world,gpu,&view);
+    view.info[2]=1; if (world->shadows_enabled) draw_meshes(frame,world,gpu,&view);
     frame->end_rendering(frame->command);
     barrier(frame->command,&gpu->shadow,VK_IMAGE_ASPECT_DEPTH_BIT,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
@@ -344,7 +345,7 @@ static bool record(const AxRenderFrame *frame,void *user)
 bool ax_world_renderer_create(AxWorldRenderer *world,AxRenderer *renderer,const AxWorldGeometry *geometry,const AxCamera *camera)
 {
     if (!world || !renderer || !renderer->device || !geometry || !camera) return false;
-    *world=(AxWorldRenderer){.renderer=renderer,.camera=camera,.geometry=geometry,.local_up={0,1,0},.sun={0.42f,0.78f,0.46f}};
+    *world=(AxWorldRenderer){.renderer=renderer,.camera=camera,.geometry=geometry,.shadows_enabled=true,.local_up={0,1,0},.sun={0.42f,0.78f,0.46f}};
     float length=sqrtf(0.42f*0.42f+0.78f*0.78f+0.46f*0.46f);
     for (size_t i=0; i<3; ++i) world->sun[i]/=length;
     AxRenderNode node={.name="world",.record=record,.prepass=prepass,.user=world,.enabled=true,.create_device=create_device,.destroy_device=destroy_device};

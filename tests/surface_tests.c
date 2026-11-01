@@ -1,4 +1,5 @@
 #include "world/surface.h"
+#include "world/mesh_optimizer.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,10 +98,28 @@ int main(void)
     n=edges(&coarse,(double[3]){-16,-16,-16},offset,all);
     n+=edges(&fine,offset,NULL,all+n);
     CHECK(closed(all,n));
+    AxMeshStats coarse_stats,fine_stats;
+    CHECK(ax_mesh_optimize(&coarse.mesh,32,1,(float[4]){9,11,13,16},&coarse_stats));
+    CHECK(ax_mesh_optimize(&fine.mesh,16,0.5f,NULL,&fine_stats));
+    CHECK(coarse_stats.triangles<=coarse_stats.visible_triangles && fine_stats.triangles<=fine_stats.visible_triangles);
+    free(all); all=malloc((coarse.mesh.index_count+fine.mesh.index_count)*sizeof(*all)); CHECK(all);
+    n=edges(&coarse,(double[3]){-16,-16,-16},NULL,all);
+    n+=edges(&fine,offset,NULL,all+n);
+    CHECK(closed(all,n));
     uint32_t *previous=fine.mesh.indices;
     CHECK(!ax_surface_build(planet,&origin,16,3,true,&fine) && fine.mesh.indices==previous);
     CHECK(ax_position_from_meters(&origin,(double[3]){100,100,100}));
     CHECK(ax_surface_build(planet,&origin,16,32,true,&empty) && !empty.mesh.index_count && empty.extent==16);
+    AxPlanetDesc flat_desc={.id=2,.radius=1000000};
+    const AxPlanet *flat=ax_scene_add_planet(&scene,&flat_desc); CHECK(flat);
+    CHECK(ax_position_from_meters(&origin,(double[3]){-16,999984,-16}));
+    CHECK(ax_surface_build(flat,&origin,32,64,false,&empty));
+    AxMeshStats flat_stats;
+    CHECK(ax_mesh_optimize(&empty.mesh,32,0.5f,NULL,&flat_stats));
+    CHECK(flat_stats.triangles<flat_stats.visible_triangles/4);
+    uint32_t *intact=empty.mesh.indices;
+    CHECK(!ax_mesh_optimize(&empty.mesh,NAN,0.5f,NULL,&flat_stats) && empty.mesh.indices==intact);
+    printf("flat terrain: %zu -> %zu triangles\n",flat_stats.visible_triangles,flat_stats.triangles);
     result=EXIT_SUCCESS;
 cleanup:
     free(all); ax_surface_destroy(&coarse); ax_surface_destroy(&fine); ax_surface_destroy(&empty); ax_scene_destroy(&scene);

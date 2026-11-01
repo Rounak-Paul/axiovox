@@ -2,11 +2,11 @@
 
 A C17/Vulkan game foundation for Windows, Linux, and macOS.
 
-Requires CMake 3.24+, a C17 compiler with atomics, a C++ compiler (for VMA's upstream
+Requires CMake 3.24+, a C17 compiler with atomics, a C++17 compiler (for the meshoptimizer integration and VMA's upstream
 CMake), and the Vulkan SDK including `glslc`. Runtime requires Vulkan 1.2 with
 `VK_KHR_dynamic_rendering`, or Vulkan 1.3. GLFW and VMA are vendored submodules;
 no system GLFW is used. VMA currently supplies headers only; allocator integration
-will require one C++14 implementation translation unit. Game sources remain C.
+will require one C++14 implementation translation unit. Game systems remain C17; the meshoptimizer integration is a narrow, exception-safe C++17 boundary with a C API.
 
 On macOS, use the SDK with MoltenVK. Set `VULKAN_SDK` or `CMAKE_PREFIX_PATH` if
 needed. Linux needs platform development dependencies for GLFW's enabled backends;
@@ -68,9 +68,23 @@ render assets. The former octree ray caster, beam passes and temporary demo are 
 Moving the camera streams terrain automatically. Workers sample immutable scene
 snapshots, reuse unchanged surface meshes, and publish complete nested LOD layouts
 so neighboring levels stay consistent. Old coverage remains until replacements are
-ready. Finer regions own their volume, including excavations. The default finest
+ready. Independent changed regions build in parallel; serial and parallel output are regression-tested for identical results. Finer regions own their volume, including excavations. The default finest
 region spans 32 m with 64 cells per side (0.5 m spacing); distant levels use coarser
 sampling. Resolution is independent of the precise coordinate addressing system.
+
+Terrain composes seeded 3D gradient/value noise, normalized fBm, ridged noise,
+cellular fields and domain warping. Terra combines continental basins, plains, hills,
+mountain provinces, ridges, detail and bounded cave channels. Luna uses layered crater
+bowls/rims and rough highlands. Spherical sampling has no latitude/longitude seams.
+Temperature, moisture, elevation and slope classify grass, soil, rock, sand and snow.
+These are procedural landforms, not simulated erosion, drainage or ocean fluids.
+
+Generated meshes remove triangles covered by finer regions, then use meshoptimizer
+for attribute-aware simplification and vertex-cache/fetch ordering. A two-cell band
+around active LOD boundaries and material seams remains protected. Simplification
+targets 15% of visible source triangles, constrained by topology and a 0.15-cell
+absolute error metric; complex terrain may retain more triangles. Moving an inner
+boundary invalidates its parent mesh so cached simplification cannot open cracks.
 
 Rendering uses indexed triangles, backface culling, infinite reverse-Z depth,
 directional shadow mapping, an atmosphere/space background, and an offscreen world
@@ -78,9 +92,16 @@ pass composited before UI. GPU transforms are camera-relative; integer addresses
 and bounded double offsets retain local movement precision at planet scale.
 
 Free-flight controls: mouse looks, W/S move along the view direction, A/D strafe,
-and E/Q move along the fixed Y axis. Base speed is 6 m/s. Hold **Shift** for cruise:
-speed increases with altitude, allowing surface-to-space travel. The cursor is locked
+and E/Q move along local gravity-up. Base speed is 6 m/s. Hold **Shift** for cruise:
+speed increases with terrain clearance, allowing surface-to-space travel. The cursor is locked
 and hidden during gameplay; menus, console, and focus loss release it.
+
+Gravity sums all bodies using configured surface acceleration: inverse-square outside,
+finite uniform-density acceleration inside. The free-flight camera parallel-transports
+its tangent frame toward net gravity-up. Alignment fades smoothly between 0.25 and
+0.02 m/s²; below that it preserves its space orientation. Gravity does not pull the
+camera down or introduce a walking/collision mode. Terra uses 9.81 m/s² and Luna
+1.62 m/s². Visits start at a terrain-aware temperate site with a properly oriented camera.
 
 ```text
 /world.planets
@@ -94,7 +115,7 @@ and hidden during gameplay; menus, console, and focus loss release it.
 ```
 
 `world.visit` is an optional navigation shortcut; flight between bodies requires no
-scene transition. `world.altitude` moves radially above the reference planet for
+scene transition. `world.altitude` moves radially above the reference planet's unedited terrain for
 inspection; look toward the body to see its sphere. `world.speed` sets base speed in
 meters per second. `world.recenter` and `world.refresh` remain compatible commands,
 but recentering happens automatically.
@@ -102,11 +123,11 @@ but recentering happens automatically.
 Carve/build take radius (box half extent) and distance ahead in meters; optional shape
 is `sphere` (default) or `box`. Edits affect the nearest body. Saves store planet
 recipes, material settings, and ordered edits independently of render caches.
-Version 2 saves also load older version 1 data. Camera pose is not saved.
+Version 3 saves include terrain recipe, cave depth and surface gravity, and load versions 1/2 with their original wave geometry. Camera pose is not saved.
 
 Terrain generation is asynchronous, but publishing new vertex/index buffers still waits
 for GPU completion. Stitching closes spatial LOD seams; temporal LOD changes can
-still pop. Edit indexing, mesh simplification and upload scheduling remain optimization work. The moon's position is static, and character
+still pop. Spatial edit indexing and upload scheduling remain optimization work. The moon's position is static, and character
 gravity/collision and orbital simulation are not implemented.
 
 ## Game HUD
@@ -252,7 +273,7 @@ narrow viewports, the centered hotbar shrinks to keep clear of the icon strip.
   end rendering, or perform transfers/compute requiring another rendering scope.
   This is an ordered node pipeline, not an automatic resource/dependency graph.
 - `world/`: scene-owned planet recipes and solid edits, precise coordinates, atomic
-  saves, indexed surface extraction, transition cells, immutable streaming snapshots,
+  saves, indexed surface extraction, transition cells, immutable parallel streaming snapshots, composed noise terrain, multi-body gravity, mesh optimization,
   and packed render geometry (`axiovox_world`). Scene volumes do not depend on a
   renderer. `axiovox_world_renderer` owns Vulkan vertex/index buffers, frame metadata,
   depth/color/shadow targets and raster pipelines, with device migration and resize

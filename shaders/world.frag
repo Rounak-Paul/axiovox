@@ -30,7 +30,7 @@ void main()
 #if !AX_WORLD_SHADOW
     vec3 n=normalize(surface_normal);
     float diffuse=max(dot(n,view.sun.xyz),0.0);
-    if (diffuse>0.0) diffuse*=visibility(relative_position,n);
+    if (diffuse>0.0 && view.info.w!=0u) diffuse*=visibility(relative_position,n);
     float elevation=dot(n,view.local_up.xyz)*0.5+0.5;
     vec3 ambient=mix(vec3(0.17,0.16,0.18),vec3(0.32,0.37,0.45),elevation);
     vec3 lit=pow(albedo,vec3(2.2))*(ambient+vec3(1.0,0.94,0.84)*diffuse*1.15);

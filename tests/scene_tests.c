@@ -92,7 +92,7 @@ static bool persistence(void)
 {
     const char *path = "scene-test-save.tmp";
     AxScene scene = {0}, loaded = {0};
-    AxPlanetDesc desc = {.id = UINT64_MAX, .seed = UINT64_MAX, .radius = 400000, .terrain_height = 6, .terrain_frequency = 0.03};
+    AxPlanetDesc desc = {.id = UINT64_MAX, .seed = UINT64_MAX, .radius = 400000, .terrain_height = 6, .terrain_frequency = 0.03, .terrain_kind=AX_TERRAIN_CONTINENTAL, .surface_gravity=9.81, .cave_depth=24};
     CHECK(ax_scene_add_planet(&scene, &desc));
     AxVolumeEdit edit = {.position = {.chunk = {INT64_MAX - 1, INT64_MIN + 1, 0}, .offset = {0.0625, 1.5, 0}},
         .half_extent = {1, 2, 3}, .shape = AX_BRUSH_BOX, .material = AX_MATERIAL_BUILDING};
@@ -101,6 +101,7 @@ static bool persistence(void)
     CHECK(ax_scene_load(&loaded, path) && loaded.count == 1);
     const AxPlanet *p = ax_scene_planet(&loaded, desc.id);
     AxMaterial material;
+    CHECK(p && ax_planet_description(p)->terrain_kind==AX_TERRAIN_CONTINENTAL && ax_planet_description(p)->surface_gravity==9.81 && ax_planet_description(p)->cave_depth==24);
     CHECK(p && ax_planet_sample(p, &edit.position, &material) < 0 && material == AX_MATERIAL_BUILDING);
     const char *invalid[] = {"AXSCENE 99 0\n", "AXSCENE 1 1\n", "AXSCENE 1 18446744073709551616\n",
         "AXSCENE 1 0\ngarbage", "AXSCENE 1 1\nP 1 1 0 0 0 nan 0 0 0\n"};
@@ -109,6 +110,15 @@ static bool persistence(void)
         CHECK(f && fputs(invalid[i], f) >= 0 && fclose(f) == 0);
         CHECK(!ax_scene_load(&loaded, path) && ax_scene_planet(&loaded, desc.id) == p);
     }
+    FILE *legacy=ax_file_open(path,"wb");
+    CHECK(legacy && fputs("AXSCENE 2 1\nP 9 42 0 0 0 100 6 0.03 0 0\n",legacy)>=0 && fclose(legacy)==0);
+    CHECK(ax_scene_load(&loaded,path));
+    p=ax_scene_planet(&loaded,9); CHECK(p && ax_planet_description(p)->terrain_kind==AX_TERRAIN_WAVES);
+    AxPosition test_point; CHECK(ax_position_from_meters(&test_point,(double[3]){1,100,3}));
+    double wave=6;
+    const double coordinates[3]={1,100,3};
+    for (size_t k=0;k<3;++k) wave*=sin(coordinates[k]*0.03+(double)(ax_noise_hash64(42+k)>>11)*0x1p-53*6.283185307179586);
+    CHECK(fabs(ax_planet_sample(p,&test_point,NULL)-(sqrt(10010)-100-wave))<1e-10);
     CHECK(remove(path) == 0);
     ax_scene_destroy(&scene); ax_scene_destroy(&loaded);
     return true;

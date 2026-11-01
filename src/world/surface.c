@@ -38,47 +38,47 @@ static double sample(const Builder *b, const double p[3], AxMaterial *material)
     if (!ax_position_move(&position, p)) return INFINITY;
     return ax_planet_sample(b->planet, &position, material);
 }
-/** Resolves a lattice point into the shared sample/edge cache. */
-static size_t lattice(const Builder *b, const uint32_t p[3])
+/** Addresses the one-cell density halo surrounding the meshing domain. */
+static size_t grid_index(const Builder *b,int x,int y,int z)
 {
-    return ((size_t)p[2] * b->side + p[1]) * b->side + p[0];
+    return ((size_t)(z+1)*b->side+(size_t)(y+1))*b->side+(size_t)(x+1);
 }
-/** Creates a smooth density-gradient vertex with material sampled just inside its projected surface. */
-static bool append_vertex(Builder *b, const double p[3], uint32_t *index)
+/** Resolves a lattice point into the shared sample/edge cache. */
+static size_t lattice(const Builder *b,const uint32_t p[3])
 {
-    if (!reserve((void **)&b->mesh.vertices, &b->vertex_capacity, b->mesh.vertex_count, 1, sizeof(AxSurfaceVertex))) return false;
-    AxSurfaceVertex vertex = {0};
-    double normal[3], length = 0, epsilon = fmax(0.001, b->step * 0.25);
-    for (size_t k = 0; k < 3; ++k) {
-        double a[3] = {p[0],p[1],p[2]}, c[3] = {p[0],p[1],p[2]};
-        a[k] += epsilon; c[k] -= epsilon;
-        normal[k] = (sample(b,a,NULL) - sample(b,c,NULL)) / (2 * epsilon);
-        length += normal[k] * normal[k];
+    return grid_index(b,(int)p[0],(int)p[1],(int)p[2]);
+}
+/** Interpolates cached central differences instead of resampling procedural noise per mesh vertex. */
+static void cached_normal(const Builder *b,const double p[3],double normal[3])
+{
+    int cell[3]; double t[3];
+    for (size_t k=0;k<3;++k) { cell[k]=(int)fmax(0,fmin(b->cells-1,floor(p[k]/b->step))); t[k]=p[k]/b->step-cell[k]; normal[k]=0; }
+    for (unsigned i=0;i<8;++i) {
+        int q[3]={cell[0]+(int)(i&1),cell[1]+(int)((i>>1)&1),cell[2]+(int)((i>>2)&1)};
+        double weight=((i&1) ? t[0] : 1-t[0])*((i&2) ? t[1] : 1-t[1])*((i&4) ? t[2] : 1-t[2]);
+        for (size_t k=0;k<3;++k) {
+            int a[3]={q[0],q[1],q[2]},c[3]={q[0],q[1],q[2]}; ++a[k]; --c[k];
+            normal[k]+=weight*(b->density[grid_index(b,a[0],a[1],a[2])]-b->density[grid_index(b,c[0],c[1],c[2])])/(2*b->step);
+        }
     }
-    length = sqrt(length);
+}
+/** Creates a smooth vertex from the cached field and resolves its exposed material without Newton resampling. */
+static bool append_vertex(Builder *b,const double p[3],uint32_t *index)
+{
+    if (!reserve((void **)&b->mesh.vertices,&b->vertex_capacity,b->mesh.vertex_count,1,sizeof(AxSurfaceVertex))) return false;
+    AxSurfaceVertex vertex={0};
+    double normal[3]; cached_normal(b,p,normal);
+    double length=hypot(hypot(normal[0],normal[1]),normal[2]);
     if (!isfinite(length)) return false;
-    if (length < 1e-12) { normal[0] = 0; normal[1] = 1; normal[2] = 0; length = 1; }
-    double q[3] = {p[0],p[1],p[2]};
-    for (size_t k = 0; k < 3; ++k) {
-        vertex.position[k] = (float)p[k];
-        vertex.normal[k] = (float)(normal[k] / length);
-    }
-    for (unsigned iteration = 0; iteration < 4; ++iteration) {
-        double distance = sample(b,q,NULL);
-        if (!isfinite(distance)) return false;
-        for (size_t k = 0; k < 3; ++k) q[k] -= normal[k] * distance / (length * length);
-    }
-    for (size_t k = 0; k < 3; ++k) q[k] -= normal[k] / length * 0.02;
-    AxMaterial material;
-    if (!isfinite(sample(b,q,&material))) return false;
-    if (material == AX_MATERIAL_AIR) {
-        material = ax_planet_description(b->planet)->surface_material;
-        if (material == AX_MATERIAL_AIR) material = AX_MATERIAL_GRASS;
-    }
-    const uint32_t colors[AX_MATERIAL_COUNT] = {0xff777777,0xff888b90,0xff42678b,0xff4c9364,0xffb7af94};
-    vertex.color = colors[material];
-    *index = (uint32_t)b->mesh.vertex_count;
-    b->mesh.vertices[b->mesh.vertex_count++] = vertex;
+    if (length<1e-12) { normal[0]=0; normal[1]=1; normal[2]=0; length=1; }
+    for (size_t k=0;k<3;++k) { normal[k]/=length; vertex.position[k]=(float)p[k]; vertex.normal[k]=(float)normal[k]; }
+    AxPosition position=b->origin;
+    if (!ax_position_move(&position,p)) return false;
+    AxMaterial material=ax_planet_surface_material(b->planet,&position,normal);
+    const uint32_t colors[AX_MATERIAL_COUNT]={0xff777777,0xff888b90,0xff42678b,0xff4c9364,0xffb7af94,0xff82b5c9,0xffe5e8ed};
+    vertex.color=colors[material];
+    *index=(uint32_t)b->mesh.vertex_count;
+    b->mesh.vertices[b->mesh.vertex_count++]=vertex;
     return true;
 }
 /** Interpolates an edge in canonical endpoint order, making neighboring cells bit-identical. */
@@ -178,14 +178,14 @@ bool ax_surface_build(const AxPlanet *planet, const AxPosition *origin, float ex
                       uint32_t cells, bool transitions, AxSurfaceRegion *region)
 {
     if (!planet || !origin || !region || !isfinite(extent) || extent<=0 || cells<2 || cells>128 || (cells&1)) return false;
-    Builder b = {.planet=planet,.origin=*origin,.step=(double)extent/cells,.cells=cells,.side=cells+1};
+    Builder b = {.planet=planet,.origin=*origin,.step=(double)extent/cells,.cells=cells,.side=cells+3};
     if (!ax_position_normalize(&b.origin)) return false;
     AxPosition end=b.origin;
     if (!ax_position_move(&end,(double[3]){extent,extent,extent})) return false;
     const AxPlanetDesc *desc=ax_planet_description(planet);
-    double center[3]={extent*0.5,extent*0.5,extent*0.5};
-    double bound=(1+3*desc->terrain_height*desc->terrain_frequency)*extent*0.8660254037844387;
-    if (fabs(sample(&b,center,NULL))>bound) {
+    double minimum,maximum;
+    if (!ax_planet_density_bounds(planet,&b.origin,extent,&minimum,&maximum)) return false;
+    if (minimum>0 || maximum<0) {
         ax_surface_destroy(region);
         *region=(AxSurfaceRegion){.planet=desc->id,.origin=b.origin,.revision=ax_planet_revision(planet),
             .extent=extent,.cells=cells,.transitions=transitions};
@@ -196,11 +196,11 @@ bool ax_surface_build(const AxPlanet *planet, const AxPosition *origin, float ex
     bool success=false;
     if (!b.density || !b.cache) goto cleanup;
     memset(b.cache,255,count*4*sizeof(uint32_t));
-    for (uint32_t z=0; z<b.side; ++z) for (uint32_t y=0; y<b.side; ++y) for (uint32_t x=0; x<b.side; ++x) {
+    for (int z=-1;z<=(int)cells+1;++z) for (int y=-1;y<=(int)cells+1;++y) for (int x=-1;x<=(int)cells+1;++x) {
         double p[3]={x*b.step,y*b.step,z*b.step};
         double value=sample(&b,p,NULL);
         if (!isfinite(value) || fabs(value)>3e38) goto cleanup;
-        b.density[lattice(&b,(uint32_t[3]){x,y,z})]=(float)value;
+        b.density[grid_index(&b,x,y,z)]=(float)value;
     }
     if (!regular_cells(&b) || (transitions && !transition_faces(&b))) goto cleanup;
     ax_surface_destroy(region);

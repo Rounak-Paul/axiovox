@@ -7,6 +7,7 @@
 #include "renderer/renderer.h"
 #include "ui/ui.h"
 #include "world/stream.h"
+#include "world/gravity.h"
 #include <math.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -30,6 +31,7 @@ typedef struct {
     AxWorldGeometry geometry;
     AxPosition view_origin;
     double altitude;
+    AxGravity gravity;
     AxPlanetId active_planet, nearby_planet;
     float flight_speed;
     AxWorldRenderer world_renderer;
@@ -59,7 +61,21 @@ static bool visit_planet(Application *app, AxPlanetId id)
     if (!planet) return false;
     double radius = ax_planet_description(planet)->radius;
     AxPosition eye;
-    if (!ax_position_from_meters(&eye, (double[3]){0, radius + 12, 20})) return false;
+    double direction[3]={0.35,0.5,-sqrt(0.6275)};
+    double base[3];
+    for (size_t k=0;k<3;++k) base[k]=direction[k]*radius;
+    double height=ax_planet_terrain_height(planet,base);
+    if (ax_planet_description(planet)->terrain_kind==AX_TERRAIN_CONTINENTAL) {
+        double score=fabs(height-ax_planet_description(planet)->terrain_height*0.12);
+        for (unsigned i=0;i<24;++i) {
+            double angle=i*2.399963229728653,candidate[3]={sqrt(0.75)*cos(angle),0.5,sqrt(0.75)*sin(angle)};
+            for (size_t k=0;k<3;++k) base[k]=candidate[k]*radius;
+            double h=ax_planet_terrain_height(planet,base),distance=fabs(h-ax_planet_description(planet)->terrain_height*0.12);
+            if (distance<score) { score=distance; height=h; memcpy(direction,candidate,sizeof(direction)); }
+        }
+    }
+    for (size_t k=0;k<3;++k) base[k]=direction[k]*(radius+height+12);
+    if (!ax_position_from_meters(&eye,base)) return false;
     AxWorldStream next = {0};
     if (!ax_world_stream_create(&next, &app->scene, id, &eye, app->jobs)) return false;
     AxWorldStream previous = app->stream;
@@ -72,7 +88,7 @@ static bool visit_planet(Application *app, AxPlanetId id)
     ax_world_stream_destroy(&previous, app->jobs);
     app->active_planet = id;
     app->view_origin = eye;
-    ax_camera_init(&app->camera, (float[3]){0,0,0}, 0, -0.15f);
+    ax_camera_init(&app->camera, (float[3]){0,0,0}, 0, -0.15f,direction);
     return true;
 }
 /** Reconciles a small float flight displacement with the precise planet frame and updates continuous LOD streaming. */
@@ -100,12 +116,13 @@ static bool update_world(Application *app)
         if (fabs(altitude) < nearest) {
             nearest = fabs(altitude);
             app->nearby_planet = body->id;
-            app->altitude = altitude;
+            app->altitude = altitude-ax_planet_terrain_height(app->scene.planets[i],delta);
             app->world_renderer.altitude = (float)altitude;
             app->world_renderer.atmosphere_height = body->id == 1 ? (float)(body->radius * 0.01) : 0;
             for (size_t k = 0; k < 3; ++k) app->world_renderer.local_up[k] = length > 0 ? (float)(delta[k] / length) : (k == 1 ? 1 : 0);
         }
     }
+    if (!ax_gravity_sample(&app->scene,app->active_planet,&app->view_origin,&app->gravity)) return false;
     if (!ax_world_stream_update(&app->stream, &app->scene, app->active_planet, &app->view_origin, app->jobs)) return false;
     if (app->stream.dirty && !publish_world(app)) return false;
     return true;
@@ -207,7 +224,7 @@ static bool command(int argc, const char *const *argv, void *user)
         if (!ax_planet_up(&app->view_origin, up)) return false;
         const AxPosition zero = {0};
         ax_position_difference(&app->view_origin, &zero, position);
-        double current = hypot(hypot(position[0], position[1]), position[2]) - ax_planet_description(planet)->radius;
+        double current = hypot(hypot(position[0], position[1]), position[2]) - ax_planet_description(planet)->radius - ax_planet_terrain_height(planet,position);
         for (size_t i = 0; i < 3; ++i) delta[i] = up[i] * (altitude - current);
         return ax_position_move(&app->view_origin, delta);
     }
@@ -298,14 +315,17 @@ int main(int argc, char **argv)
     app.jobs = ax_jobs_create((size_t)ax_config_get(&app.config, "jobs.workers")->value);
     if (!app.jobs) { ax_log(AX_LOG_ERROR, "Worker pool creation failed"); goto cleanup; }
     ax_scene_init(&app.scene, &events);
-    AxPlanetDesc first = {.id = 1, .seed = 42, .radius = 1000000, .terrain_height = 8, .terrain_frequency = 0.06};
-    AxPlanetDesc second = {.id = 2, .seed = 917, .center = {1200000, 1800000, -2400000}, .radius = 270000, .terrain_height = 12, .terrain_frequency = 0.04, .surface_material = AX_MATERIAL_ROCK};
+    AxPlanetDesc first = {.id = 1, .seed = 42, .radius = 1000000, .terrain_height = 6500, .terrain_frequency = 0.005, .terrain_kind = AX_TERRAIN_CONTINENTAL, .surface_gravity = 9.81, .cave_depth = 128};
+    AxPlanetDesc second = {.id = 2, .seed = 917, .center = {1200000, 1800000, -2400000}, .radius = 270000, .terrain_height = 2500, .terrain_frequency = 0.001, .terrain_kind = AX_TERRAIN_CRATERED, .surface_gravity = 1.62, .surface_material = AX_MATERIAL_ROCK};
     if (!ax_scene_add_planet(&app.scene, &first) || !ax_scene_add_planet(&app.scene, &second)) goto cleanup;
     struct timespec build_begin, build_end;
     timespec_get(&build_begin, TIME_UTC);
     if (!visit_planet(&app, 1)) { ax_log(AX_LOG_ERROR, "World generation failed"); goto cleanup; }
     timespec_get(&build_end, TIME_UTC);
     app.flight_speed = 6;
+    size_t source_triangles=0,visible_triangles=0;
+    for (size_t i=0;i<app.stream.count;++i) { source_triangles+=app.stream.regions[i].source_triangles; visible_triangles+=app.stream.regions[i].visible_triangles; }
+    ax_log(AX_LOG_INFO,"Terrain optimizer: %zu source, %zu visible -> %zu triangles",source_triangles,visible_triangles,app.geometry.index_count/3);
     ax_log(AX_LOG_INFO, "Terra/Luna: %zu mesh regions, %zu triangles, %.1f MiB built in %.0f ms", app.geometry.count, app.geometry.index_count / 3,
            (double)(app.geometry.vertex_count * sizeof(AxSurfaceVertex) + app.geometry.index_count * sizeof(uint32_t)) / (1024 * 1024),
            (double)(build_end.tv_sec - build_begin.tv_sec) * 1000.0 + (double)(build_end.tv_nsec - build_begin.tv_nsec) / 1e6);
@@ -344,6 +364,7 @@ int main(int argc, char **argv)
         ax_ui_update(&app.ui, now);
         bool cruise = ax_input_down(&app.input, AX_KEY_LEFT_SHIFT) || ax_input_down(&app.input, AX_KEY_RIGHT_SHIFT);
         app.camera.move_speed = cruise ? (float)fmin(250000, app.flight_speed + fmax(app.altitude, 0) * 0.2) : app.flight_speed;
+        ax_camera_align(&app.camera,app.gravity.up,app.gravity.alignment,now-previous_time);
         ax_camera_update(&app.camera, &app.input, now - previous_time);
         previous_time = now;
         if (!update_world(&app)) {

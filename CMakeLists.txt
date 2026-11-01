@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(axiovox VERSION 0.1.0 LANGUAGES C)
+project(axiovox VERSION 0.1.0 LANGUAGES C CXX)
 
 find_package(Vulkan REQUIRED COMPONENTS glslc)
 find_package(Threads REQUIRED)
@@ -86,8 +86,21 @@ add_library(axiovox_ui STATIC src/ui/ui.c "${generated_dir}/ui.vert.inc" "${gene
 target_include_directories(axiovox_ui PRIVATE "${generated_dir}")
 target_link_libraries(axiovox_ui PUBLIC axiovox_renderer axiovox_ui_layout)
 
-add_library(axiovox_world STATIC src/world/camera.c src/world/surface.c src/world/coordinates.c src/world/scene.c src/world/geometry.c src/world/stream.c)
-target_link_libraries(axiovox_world PUBLIC axiovox_core)
+add_library(axiovox_meshoptimizer STATIC
+    vendors/meshoptimizer/src/allocator.cpp
+    vendors/meshoptimizer/src/indexgenerator.cpp
+    vendors/meshoptimizer/src/simplifier.cpp
+    vendors/meshoptimizer/src/vcacheoptimizer.cpp
+    vendors/meshoptimizer/src/vfetchoptimizer.cpp)
+set_target_properties(axiovox_meshoptimizer PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_include_directories(axiovox_meshoptimizer SYSTEM PUBLIC vendors/meshoptimizer/src)
+
+add_library(axiovox_world STATIC src/math/noise.c src/world/terrain.c src/world/gravity.c src/world/mesh_optimizer.cpp src/world/camera.c src/world/surface.c src/world/coordinates.c src/world/scene.c src/world/geometry.c src/world/stream.c)
+target_link_libraries(axiovox_world PUBLIC axiovox_core PRIVATE axiovox_meshoptimizer)
+set_target_properties(axiovox_world PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(axiovox_world PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
+endif()
 target_include_directories(axiovox_world SYSTEM PRIVATE vendors)
 if(UNIX)
     target_link_libraries(axiovox_world PUBLIC m)
@@ -157,6 +170,12 @@ if(BUILD_TESTING)
     set_target_properties(axiovox_menu_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
     add_test(NAME menu COMMAND axiovox_menu_tests)
     set_tests_properties(menu PROPERTIES TIMEOUT 30)
+
+    add_executable(axiovox_procedural_tests tests/procedural_tests.c)
+    target_link_libraries(axiovox_procedural_tests PRIVATE axiovox_world)
+    set_target_properties(axiovox_procedural_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    add_test(NAME procedural COMMAND axiovox_procedural_tests)
+    set_tests_properties(procedural PROPERTIES TIMEOUT 60)
 
     add_executable(axiovox_surface_tests tests/surface_tests.c)
     target_link_libraries(axiovox_surface_tests PRIVATE axiovox_world)

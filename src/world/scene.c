@@ -11,7 +11,7 @@ struct AxPlanet {
     AxVolumeEdit *edits;
     size_t count, capacity;
     uint64_t revision;
-    double phase[3];
+    AxTerrain terrain;
 };
 /** Expands a dynamic array with checked size arithmetic; leaves storage unchanged on failure. */
 static bool reserve(void **data, size_t *capacity, size_t count, size_t size)
@@ -25,20 +25,12 @@ static bool reserve(void **data, size_t *capacity, size_t count, size_t size)
     *capacity = next;
     return true;
 }
-/** Maps a seed to reproducible integer randomness without shared RNG state. */
-static uint64_t mix(uint64_t value)
-{
-    value = (value ^ (value >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
-    value = (value ^ (value >> 27)) * UINT64_C(0x94d049bb133111eb);
-    return value ^ (value >> 31);
-}
-/** Validates a finite generation domain with centimeter-scale double precision. */
+/** Validates scene placement, gravity and material metadata; terrain owns recipe validation. */
 static bool valid_description(const AxPlanetDesc *d)
 {
-    if (!d || !d->id || !isfinite(d->radius) || d->radius < 1 || d->radius > 1e12 ||
-        !isfinite(d->terrain_height) || d->terrain_height < 0 || d->terrain_height > d->radius * 0.25 ||
-        !isfinite(d->terrain_frequency) || d->terrain_frequency < 0 || d->terrain_frequency > 16 || d->surface_material < AX_MATERIAL_AIR || d->surface_material >= AX_MATERIAL_COUNT) return false;
-    for (size_t i = 0; i < 3; ++i) if (!isfinite(d->center[i])) return false;
+    if (!d || !d->id || d->surface_material<AX_MATERIAL_AIR || d->surface_material>=AX_MATERIAL_COUNT ||
+        !isfinite(d->surface_gravity) || d->surface_gravity<0 || d->surface_gravity>10000) return false;
+    for (size_t i=0;i<3;++i) if (!isfinite(d->center[i])) return false;
     return true;
 }
 /** Dispatches committed scene changes while preventing mutation during borrowed reads. */
@@ -70,10 +62,12 @@ AxPlanet *ax_scene_add_planet(AxScene *scene, const AxPlanetDesc *desc)
     if (!scene || scene->notifying || scene->count >= AX_SCENE_MAX_PLANETS || !valid_description(desc) || ax_scene_planet(scene, desc->id)) return NULL;
     AxPlanet *planet = calloc(1, sizeof(*planet));
     if (!planet) return NULL;
+    if (!ax_terrain_init(&planet->terrain,desc->terrain_kind,desc->seed,desc->radius,desc->terrain_height,desc->terrain_frequency,desc->cave_depth)) {
+        free(planet); return NULL;
+    }
     if (!reserve((void **)&scene->planets, &scene->capacity, scene->count, sizeof(*scene->planets))) { free(planet); return NULL; }
     planet->desc = *desc;
     planet->revision = 1;
-    for (size_t i = 0; i < 3; ++i) planet->phase[i] = (double)(mix(desc->seed + i) >> 11) * 0x1p-53 * 6.283185307179586;
     scene->planets[scene->count++] = planet;
     changed(scene, desc->id, planet->revision);
     return planet;
@@ -90,7 +84,8 @@ static double brush_distance(const AxVolumeEdit *edit, const AxPosition *positio
     for (size_t i = 0; i < 3; ++i) q[i] = fabs(p[i]) - edit->half_extent[i];
     return hypot(hypot(fmax(q[0], 0), fmax(q[1], 0)), fmax(q[2], 0)) + fmin(fmax(q[0], fmax(q[1], q[2])), 0);
 }
-double ax_planet_sample(const AxPlanet *planet, const AxPosition *position, AxMaterial *material)
+/** Evaluates one authoritative field path, with either occupied-volume or extracted-surface material semantics. */
+static double sample_volume(const AxPlanet *planet,const AxPosition *position,AxMaterial *material,const double surface_normal[3])
 {
     if (material) *material = AX_MATERIAL_AIR;
     if (!planet || !position) return INFINITY;
@@ -100,10 +95,20 @@ double ax_planet_sample(const AxPlanet *planet, const AxPosition *position, AxMa
     const AxPosition zero = {0};
     ax_position_difference(&normalized, &zero, p);
     const AxPlanetDesc *d = &planet->desc;
-    double height = d->terrain_height;
-    for (size_t i = 0; i < 3; ++i) height *= sin(p[i] * d->terrain_frequency + planet->phase[i]);
-    double field = hypot(hypot(p[0], p[1]), p[2]) - d->radius - height;
-    AxMaterial result = field < -2 ? AX_MATERIAL_ROCK : field < -0.25 ? AX_MATERIAL_SOIL : AX_MATERIAL_GRASS;
+    AxTerrainClimate climate;
+    double field=ax_terrain_density(&planet->terrain,p,material ? &climate : NULL);
+    double surface_depth=material ? hypot(hypot(p[0],p[1]),p[2])-d->radius-climate.elevation : field;
+    AxMaterial result=surface_normal ? AX_MATERIAL_GRASS : surface_depth<-2 ? AX_MATERIAL_ROCK : surface_depth<-0.25 ? AX_MATERIAL_SOIL : AX_MATERIAL_GRASS;
+    if (material && d->terrain_kind==AX_TERRAIN_CONTINENTAL && (surface_normal || surface_depth>=-0.25)) {
+        if (climate.temperature<0.22) result=AX_MATERIAL_SNOW;
+        else if (climate.elevation<d->terrain_height*0.025) result=AX_MATERIAL_SAND;
+        else if (climate.moisture<0.35) result=AX_MATERIAL_SOIL;
+    }
+    if (surface_normal) {
+        double length=hypot(hypot(p[0],p[1]),p[2]);
+        double slope=length>0 ? (surface_normal[0]*p[0]+surface_normal[1]*p[1]+surface_normal[2]*p[2])/length : 1;
+        if (slope<0.65 || field>surface_depth+1e-5) result=AX_MATERIAL_ROCK;
+    }
     if (d->surface_material != AX_MATERIAL_AIR) result = d->surface_material;
     for (size_t i = 0; i < planet->count; ++i) {
         const AxVolumeEdit *edit = &planet->edits[i];
@@ -112,8 +117,18 @@ double ax_planet_sample(const AxPlanet *planet, const AxPosition *position, AxMa
             if (-b > field) { field = -b; result = AX_MATERIAL_ROCK; }
         } else if (b < field) { field = b; result = edit->material; }
     }
-    if (material && field <= 0) *material = result;
+    if (material && (surface_normal || field <= 0)) *material = result;
     return field;
+}
+double ax_planet_sample(const AxPlanet *planet,const AxPosition *position,AxMaterial *material)
+{
+    return sample_volume(planet,position,material,NULL);
+}
+AxMaterial ax_planet_surface_material(const AxPlanet *planet,const AxPosition *position,const double normal[3])
+{
+    AxMaterial material=AX_MATERIAL_AIR;
+    if (normal) sample_volume(planet,position,&material,normal);
+    return material;
 }
 bool ax_scene_edit(AxScene *scene, AxPlanetId id, const AxVolumeEdit *edit)
 {
@@ -148,12 +163,12 @@ bool ax_planet_up(const AxPosition *position, double up[3])
 static bool write_scene(FILE *file, const void *user)
 {
     const AxScene *scene = user;
-    if (fprintf(file, "AXSCENE 2 %zu\n", scene->count) < 0) return false;
+    if (fprintf(file, "AXSCENE 3 %zu\n", scene->count) < 0) return false;
     for (size_t i = 0; i < scene->count; ++i) {
         const AxPlanet *p = scene->planets[i];
         const AxPlanetDesc *d = &p->desc;
-        if (fprintf(file, "P %" PRIu64 " %" PRIu64 " %a %a %a %a %a %a %u %zu\n", d->id, d->seed,
-                    d->center[0], d->center[1], d->center[2], d->radius, d->terrain_height, d->terrain_frequency, (unsigned)d->surface_material, p->count) < 0) return false;
+        if (fprintf(file, "P %" PRIu64 " %" PRIu64 " %a %a %a %a %a %a %u %u %a %a %zu\n", d->id, d->seed,
+                    d->center[0], d->center[1], d->center[2], d->radius, d->terrain_height, d->terrain_frequency, (unsigned)d->surface_material, (unsigned)d->terrain_kind, d->surface_gravity, d->cave_depth, p->count) < 0) return false;
         for (size_t j = 0; j < p->count; ++j) {
             const AxVolumeEdit *e = &p->edits[j];
             if (fprintf(file, "E %d %d %d %" PRId64 " %" PRId64 " %" PRId64 " %a %a %a %a %a %a\n",
@@ -221,26 +236,32 @@ static bool parse_real(const char *text, double *value)
 }
 bool ax_scene_load(AxScene *scene, const char *path)
 {
-    if (!scene || scene->notifying || !path) return false;
+    if (!scene || scene->notifying || !path || scene->epoch==UINT64_MAX) return false;
     FILE *file = ax_file_open(path, "rb");
     if (!file) return false;
     AxScene next = {0};
     char line[1024], *fields[16];
     uint64_t planets = 0;
-    bool version_two = false;
+    uint64_t version=0;
     bool valid = read_record(file, line, fields) == 3 && !strcmp(fields[0], "AXSCENE") &&
-                 (!strcmp(fields[1], "1") || (version_two = !strcmp(fields[1], "2"))) && parse_unsigned(fields[2], &planets) && planets <= AX_SCENE_MAX_PLANETS;
+                 (parse_unsigned(fields[1],&version) && version>=1 && version<=3) && parse_unsigned(fields[2], &planets) && planets <= AX_SCENE_MAX_PLANETS;
     for (uint64_t i = 0; valid && i < planets; ++i) {
         AxPlanetDesc d = {0};
         uint64_t edits = 0;
-        valid = read_record(file, line, fields) == (version_two ? 11u : 10u) && !strcmp(fields[0], "P") &&
+        valid = read_record(file, line, fields) == (version==3 ? 14u : version==2 ? 11u : 10u) && !strcmp(fields[0], "P") &&
                 parse_unsigned(fields[1], &d.id) && parse_unsigned(fields[2], &d.seed);
         for (size_t k = 0; valid && k < 3; ++k) valid = parse_real(fields[3 + k], &d.center[k]);
         uint64_t surface = 0;
-        valid = valid && (!version_two || (parse_unsigned(fields[9], &surface) && surface < AX_MATERIAL_COUNT));
+        valid = valid && (version<2 || (parse_unsigned(fields[9], &surface) && surface < AX_MATERIAL_COUNT));
         d.surface_material = (AxMaterial)surface;
+        uint64_t kind=0;
+        if (version==3) {
+            valid=valid && parse_unsigned(fields[10],&kind) && kind<AX_TERRAIN_COUNT &&
+                  parse_real(fields[11],&d.surface_gravity) && parse_real(fields[12],&d.cave_depth);
+            d.terrain_kind=(AxTerrainKind)kind;
+        } else d.surface_gravity=9.81;
         valid = valid && parse_real(fields[6], &d.radius) && parse_real(fields[7], &d.terrain_height) &&
-                parse_real(fields[8], &d.terrain_frequency) && parse_unsigned(fields[version_two ? 10 : 9], &edits) && edits <= AX_PLANET_MAX_EDITS;
+                parse_real(fields[8], &d.terrain_frequency) && parse_unsigned(fields[version==3 ? 13 : version==2 ? 10 : 9], &edits) && edits <= AX_PLANET_MAX_EDITS;
         if (!valid || !ax_scene_add_planet(&next, &d)) { valid = false; break; }
         for (uint64_t j = 0; valid && j < edits; ++j) {
             AxVolumeEdit e = {0};
@@ -263,6 +284,7 @@ bool ax_scene_load(AxScene *scene, const char *path)
     if (fclose(file) != 0) valid = false;
     if (valid) {
         AxEvents *events = scene->events;
+        next.epoch=scene->epoch+1;
         ax_scene_destroy(scene);
         *scene = next;
         scene->events = events;
@@ -295,6 +317,7 @@ bool ax_scene_copy_planet(const AxScene *scene, AxPlanetId id, AxScene *copy)
     next.planets[0]=clone_planet(source);
     if (!next.planets[0]) { free(next.planets); return false; }
     next.count=next.capacity=1;
+    next.epoch=scene->epoch;
     *copy=next;
     return true;
 }
@@ -328,7 +351,39 @@ bool ax_scene_clone(const AxScene *scene, AxScene *copy)
         if (!planet) { ax_scene_destroy(&next); return false; }
         next.planets[next.count++]=planet;
     }
+    next.epoch=scene->epoch;
     ax_scene_destroy(copy);
     *copy=next;
     return true;
+}
+
+bool ax_planet_density_bounds(const AxPlanet *planet,const AxPosition *origin,double extent,double *minimum,double *maximum)
+{
+    if (!planet || !origin || !minimum || !maximum || !isfinite(extent) || extent<=0) return false;
+    AxPosition center=*origin;
+    if (!ax_position_move(&center,(double[3]){extent/2,extent/2,extent/2})) return false;
+    const AxPosition zero={0};
+    double p[3];
+    ax_position_difference(&center,&zero,p);
+    double radius=hypot(hypot(p[0],p[1]),p[2]),reach=extent*0.8660254037844387;
+    const AxPlanetDesc *d=&planet->desc;
+    double lo=fmax(0,radius-reach)-d->radius-d->terrain_height;
+    double hi=radius+reach-d->radius+d->terrain_height;
+    if (d->cave_depth>0) {
+        double cave_max=fmin(-lo-6,hi+d->cave_depth);
+        hi=fmax(hi,cave_max);
+    }
+    for (size_t i=0;i<planet->count;++i) {
+        const AxVolumeEdit *edit=&planet->edits[i];
+        double distance=brush_distance(edit,&center),a=distance-reach,b=distance+reach;
+        if (edit->remove) { lo=fmax(lo,-b); hi=fmax(hi,-a); }
+        else { lo=fmin(lo,a); hi=fmin(hi,b); }
+    }
+    *minimum=lo; *maximum=hi;
+    return true;
+}
+
+double ax_planet_terrain_height(const AxPlanet *planet,const double position[3])
+{
+    return planet && position ? ax_terrain_height(&planet->terrain,position,NULL) : 0;
 }

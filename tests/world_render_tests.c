@@ -1,4 +1,5 @@
 #include "world/world_renderer.h"
+#include "world/mesh_optimizer.h"
 #include "renderer/memory.h"
 #include <string.h>
 #include <GLFW/glfw3.h>
@@ -110,16 +111,19 @@ int main(void)
     AxSurfaceRegion bodies[3]={0};
     AxWorldGeometry geometry={0},refined={0};
     int status=EXIT_FAILURE;
+    AxMeshStats mesh_stats;
     AxPlanetDesc terra={.id=1,.radius=10};
     AxPlanetDesc luna={.id=2,.center={25,0,0},.radius=4,.surface_material=AX_MATERIAL_ROCK};
     CHECK(ax_scene_add_planet(&scene,&terra) && ax_scene_add_planet(&scene,&luna));
     AxPosition origin;
     CHECK(ax_position_from_meters(&origin,(double[3]){-16,-16,-16}));
     CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,32,32,false,&bodies[0]));
+    CHECK(ax_mesh_optimize(&bodies[0].mesh,32,1,NULL,&mesh_stats));
     CHECK(ax_position_from_meters(&origin,(double[3]){-8,-8,-8}));
     CHECK(ax_surface_build(ax_scene_planet(&scene,2),&origin,16,32,false,&bodies[1]));
+    CHECK(ax_mesh_optimize(&bodies[1].mesh,16,0.5f,NULL,&mesh_stats));
     CHECK(ax_world_geometry_build(&scene,bodies,2,&geometry));
-    ax_camera_init(&camera,(float[3]){0,0,0},0,0);
+    ax_camera_init(&camera,(float[3]){0,0,0},0,0,NULL);
     CHECK(ax_window_create(&window,&events,320,240));
     CHECK(ax_renderer_create(&renderer,&window,&events,-1));
     CHECK(ax_world_renderer_create(&world,&renderer,&geometry,&camera));
@@ -143,28 +147,36 @@ int main(void)
     CHECK(moon_x<renderer.extent.width && pixels[moon]+pixels[moon+1]+pixels[moon+2]>90);
     int surface_green=2*pixels[center+1]-pixels[center]-pixels[center+2];
     CHECK(surface_green>30);
-    double floor_x=-1.4,floor_y=-3.0,floor_z=sqrt(100-floor_x*floor_x-floor_y*floor_y);
+    double floor_x=-1.0,floor_y=-2.0,floor_z=sqrt(100-floor_x*floor_x-floor_y*floor_y);
     double distance=40-floor_z;
     size_t shadow_x=(size_t)((floor_x/(distance*tangent*renderer.extent.width/renderer.extent.height)+1)*0.5*renderer.extent.width);
     size_t shadow_y=(size_t)((-floor_y/(distance*tangent)+1)*0.5*renderer.extent.height);
     size_t shadow_pixel=(shadow_y*renderer.extent.width+shadow_x)*4;
-    int unshadowed=pixels[shadow_pixel]+pixels[shadow_pixel+1]+pixels[shadow_pixel+2];
     AxVolumeEdit block={.half_extent={1,1,1},.shape=AX_BRUSH_BOX,.material=AX_MATERIAL_BUILDING};
     CHECK(ax_position_from_meters(&block.position,(double[3]){0,0,11}));
     CHECK(ax_scene_edit(&scene,1,&block));
     CHECK(ax_position_from_meters(&origin,(double[3]){-16,-16,-16}));
     CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,32,32,false,&bodies[0]));
+    CHECK(ax_mesh_optimize(&bodies[0].mesh,32,1,NULL,&mesh_stats));
     CHECK(ax_world_geometry_build(&scene,bodies,2,&refined));
     CHECK(ax_world_renderer_set_geometry(&world,&refined));
     ax_world_geometry_destroy(&geometry); geometry=refined; refined=(AxWorldGeometry){0}; world.geometry=&geometry;
     CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
     int shadowed=pixels[shadow_pixel]+pixels[shadow_pixel+1]+pixels[shadow_pixel+2];
+    world.shadows_enabled=false;
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    int unshadowed=pixels[shadow_pixel]+pixels[shadow_pixel+1]+pixels[shadow_pixel+2];
+    world.shadows_enabled=true;
     CHECK(shadowed+25<unshadowed);
     AxVolumeEdit excavation={.half_extent={3,3,3},.material=AX_MATERIAL_ROCK,.remove=true};
     CHECK(ax_position_from_meters(&excavation.position,(double[3]){0,0,10}));
     CHECK(ax_scene_edit(&scene,1,&excavation));
     CHECK(ax_position_from_meters(&origin,(double[3]){-4,-4,6}));
     CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,8,16,true,&bodies[2]));
+    CHECK(ax_mesh_optimize(&bodies[2].mesh,8,0.5f,NULL,&mesh_stats));
+    CHECK(ax_position_from_meters(&origin,(double[3]){-16,-16,-16}));
+    CHECK(ax_surface_build(ax_scene_planet(&scene,1),&origin,32,32,false,&bodies[0]));
+    CHECK(ax_mesh_optimize(&bodies[0].mesh,32,1,(float[4]){12,12,22,8},&mesh_stats));
     CHECK(ax_world_geometry_build(&scene,bodies,3,&refined));
     CHECK(ax_world_renderer_set_geometry(&world,&refined));
     ax_world_geometry_destroy(&geometry); geometry=refined; refined=(AxWorldGeometry){0}; world.geometry=&geometry;
@@ -172,6 +184,10 @@ int main(void)
     int excavated_green=2*pixels[center+1]-pixels[center]-pixels[center+2];
     CHECK(abs(excavated_green)<30 && excavated_green<surface_green);
     CHECK(ax_position_from_meters(&world.view_origin,(double[3]){0,0,14}));
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    CHECK(pixels[center]+pixels[center+1]+pixels[center+2]>90);
+    ax_camera_init(&camera,NULL,0,-1.56f,(double[3]){1,0,0});
+    CHECK(ax_position_from_meters(&world.view_origin,(double[3]){40,0,0}));
     CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
     CHECK(pixels[center]+pixels[center+1]+pixels[center+2]>90);
     destroy_capture(&capture);
