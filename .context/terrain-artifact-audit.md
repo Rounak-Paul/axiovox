@@ -43,9 +43,7 @@ is AX_STREAM_REPLAN_DISTANCE (2 m).
 ## Known costs and limits
 
 See measured numbers in the final validation section. Mesh rebuilds dominate settle time,
-and most rebuilt leaves are empty but still sample a full lattice. Cheap emptiness rejection
-would need a true Lipschitz bound; the analytic worst case is about 16, too loose above
-extent 256, and an estimate there would risk holes. Publication still drains the device. Caves are capped at the 32/64 m LOD boundary, so a
+Publication still drains the device. Caves are capped at the 32/64 m LOD boundary, so a
 tunnel seen from inside ends at that distance until the camera approaches.
 
 ## Final validation
@@ -90,3 +88,31 @@ Validation layers (test relinked through the loader; the default build links Mol
 layers): world_render, which covers fades, resize and device migration mid-fade, reports only
 VUID-VkDescriptorImageInfo-mutableComparisonSamplers-04450. It predates the fade: the shadow comparison
 sampler is written as a mutable descriptor. Fix would be an immutable sampler on binding 1. Not done.
+
+## Async startup
+
+`ax_world_stream_create` builds only a 64-leaf layout (AX_STREAM_BOOTSTRAP_LEAVES) before the first
+frame. Later layouts quadruple the budget (256, 1,024, 4,096) on workers and fade in. Score ordering
+puts nearest terrain first. `finished_budget` records the last completed stage: it must be the budget
+actually built, or the last stage waits for camera movement (a bug hit during implementation). The
+terrain build still precedes window creation in `main.c`, but is now about 90 ms on 8 workers.
+
+## Fast empty chunks and nearby-first layouts
+
+Shell shortcut (`surface.c`): where `ax_planet_surface_crosses_boundary` holds (no edit near, cube
+excludes center, not wave terrain), terrain cannot enter a chunk without changing sign on its shell.
+Sampling the shell first skips the interior of empty chunks, and neighbors share those samples, so it
+cannot crack. It can drop a one-cell spire narrower than the lattice. With caves on, only an all-air shell
+counts as empty, since rock may hold a closed pocket. `plan()` also reuses known-empty chunks when only
+stitching changed; with caves on, sealing must match too (this branch has no test that would fail).
+
+Nearby-first (`stream.c`): moves over AX_STREAM_FOCUS_TRAVEL with a leaf around the eye of 64 m or more run
+focused stages. Within AX_STREAM_FOCUS_RADIUS, leaves score from the new eye and stop at a stage extent,
+two levels finer each stage down to 16 m; beyond it they score from `full_eye`, so meshes reuse. Every
+stage is one balanced, stitched cut. A full layout always follows, so distant terrain cannot starve. Jumping
+straight to 8 m gained little: 2:1 grading costs about 200 leaves per level regardless of radius.
+Old and new fine regions together can hit the 4,096 cap; the lowest-score splits then roll back.
+
+Crack checks: `open_edges` in stream tests welds whole cuts at each stage. Real Terra scan (scratch tool):
+82 layouts, 12 sites, within 1500 m of the eye: no unpaired edges, widest gap 0.10 mm (float rounding).
+Sampled slopes only reached 0.56, so this does not exhaust steep terrain.

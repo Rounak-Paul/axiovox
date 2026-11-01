@@ -74,6 +74,9 @@ smallest allowed extent is 8 m (0.5 m spacing), subject to the 4,096-leaf budget
 Workers plan against immutable snapshots, reuse matching meshes, and build changed
 chunks in parallel. Complete layouts publish coherently while old coverage remains
 visible. Queue pressure defers work instead of meshing on the render thread.
+Startup and planet visits build a coarse 64-chunk layout before the first frame, nearest terrain first.
+Workers then refine it in stages (256, 1,024, 4,096 chunks) while the game runs.
+After a long move, nearby terrain publishes first, coarse to fine, then the full layout follows.
 Each streamed layout cross-fades over the previous one for 0.25 s, so LOD changes do not pop.
 Both layouts are complete, with their own shadows; teleports and debug views switch at once.
 Resolution is independent of the precise coordinate addressing system.

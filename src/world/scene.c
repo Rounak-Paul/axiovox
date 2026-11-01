@@ -463,6 +463,22 @@ bool ax_planet_surface_likely(const AxPlanet *planet,const AxPosition *origin,do
     return radius-reach-d->radius-highest<=margin && radius+reach-d->radius-lowest>=-band-margin;
 }
 
+bool ax_planet_surface_crosses_boundary(const AxPlanet *planet,const AxPosition *origin,double extent)
+{
+    if (!planet || !origin || !isfinite(extent) || extent<=0) return false;
+    const AxPlanetDesc *d=&planet->desc;
+    if (d->terrain_kind==AX_TERRAIN_WAVES && d->terrain_height>0) return false;
+    AxPosition center=*origin;
+    if (!ax_position_move(&center,(double[3]){extent/2,extent/2,extent/2})) return false;
+    const AxPosition zero={0};
+    double p[3];
+    ax_position_difference(&center,&zero,p);
+    if (fabs(p[0])<=extent/2 && fabs(p[1])<=extent/2 && fabs(p[2])<=extent/2) return false;
+    double reach=extent*0.8660254037844387;
+    for (size_t i=0;i<planet->count;++i) if (brush_distance(&planet->edits[i],&center)<=reach) return false;
+    return true;
+}
+
 double ax_planet_terrain_height(const AxPlanet *planet,const double position[3])
 {
     return planet && position ? ax_terrain_height(&planet->terrain,position,NULL) : 0;

@@ -33,7 +33,7 @@ commands, and make terrain LOD follow camera distance in every direction.
 - Planning and changed-region meshing run on the existing pool with immutable source
   snapshots and borrowed live meshes. Owner drains accepted work before destroying
   metadata. Queue saturation defers submissions, never inline work on the render thread.
-  Startup is synchronous. Scene epoch, body set and revisions reject stale publication.
+  Startup builds only the bootstrap stage synchronously; see `terrain-artifact-audit.md`. Scene epoch, body set and revisions reject stale publication.
 - Mesh reuse keys: epoch, planet, revision, fixed origin/extent, transition mask. Unchanged
   layouts only advance the planned eye; no redundant GPU publication. Replan after1 m
   displacement or source/frame change. Completed layouts publish coherently.

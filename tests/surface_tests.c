@@ -176,6 +176,80 @@ static bool coarse_terrain_has_no_pits(void)
 cleanup:
     ax_surface_destroy(&region); ax_scene_destroy(&scene); return ok;
 }
+/** Compares the shell shortcut with brute-force sampling on real terrain: a mixed shell must mesh, a uniform one must not. */
+static bool shell_matches_lattice(void)
+{
+    AxScene scene={0}; AxSurfaceRegion region={0}; bool ok=false; size_t meshed=0,skipped=0;
+    AxPlanetDesc desc={.id=1,.seed=42,.radius=1000000,.terrain_height=6500,.terrain_frequency=0.005,.terrain_kind=AX_TERRAIN_CONTINENTAL};
+    const AxPlanet *planet=ax_scene_add_planet(&scene,&desc);
+    if (!planet) goto cleanup;
+    const uint32_t cells=AX_SURFACE_CELLS;
+    for (unsigned sample=0;sample<512;++sample) {
+        double angle=sample*2.399963229728653,latitude=-0.8+1.6*(sample%64)/63.0,flat=sqrt(1-latitude*latitude);
+        double extent=8.0*(1u<<(sample%6)),up[3]={flat*cos(angle),latitude,flat*sin(angle)},base[3],minimum[3]; AxPosition origin;
+        for (size_t k=0;k<3;++k) base[k]=up[k]*1000000;
+        double height=ax_planet_terrain_height(planet,base);
+        for (size_t k=0;k<3;++k) minimum[k]=floor((up[k]*(1000000+height)+(double)(sample%3)*extent*0.7)/extent)*extent;
+        if (!ax_position_from_meters(&origin,minimum) || !ax_surface_build(planet,&origin,(float)extent,cells,0,0,&region)) goto cleanup;
+        bool solid=false,air=false;
+        for (uint32_t z=0;z<=cells;++z) for (uint32_t y=0;y<=cells;++y) for (uint32_t x=0;x<=cells;++x) {
+            if (x && y && z && x<cells && y<cells && z<cells) continue;
+            AxPosition point=origin; double step=extent/cells;
+            if (!ax_position_move(&point,(double[3]){x*step,y*step,z*step})) goto cleanup;
+            if ((float)ax_planet_sample_lod(planet,&point,false)<0) solid=true; else air=true;
+        }
+        if ((solid && air)!=(region.mesh.index_count>0)) { fprintf(stderr,"shell mixed=%d but %zu indices\n",solid && air,region.mesh.index_count); goto cleanup; }
+        if (region.mesh.index_count) ++meshed; else ++skipped;
+    }
+    ok=meshed>0 && skipped>0;
+cleanup:
+    ax_surface_destroy(&region); ax_scene_destroy(&scene); return ok;
+}
+/** Requires a cave pocket sealed inside solid rock to mesh, though its chunk's whole shell samples solid. */
+static bool enclosed_cave_meshes(void)
+{
+    AxScene scene={0}; AxSurfaceRegion region={0}; bool ok=false;
+    AxPlanetDesc desc={.id=1,.seed=7,.radius=4000,.terrain_kind=AX_TERRAIN_CONTINENTAL,.cave_depth=32};
+    const AxPlanet *planet=ax_scene_add_planet(&scene,&desc);
+    if (!planet) goto cleanup;
+    const double extent=32,step=extent/AX_SURFACE_CELLS;
+    for (unsigned sample=0;sample<8192 && !ok;++sample) {
+        double angle=sample*2.399963229728653,latitude=-0.9+1.8*sample/8191.0,flat=sqrt(1-latitude*latitude),depth=30+(sample%4)*8.0;
+        double up[3]={flat*cos(angle),latitude,flat*sin(angle)},minimum[3]; AxPosition origin;
+        for (size_t k=0;k<3;++k) minimum[k]=floor(up[k]*(4000-depth)/extent)*extent;
+        if (!ax_position_from_meters(&origin,minimum)) goto cleanup;
+        bool shell_solid=true,interior_air=false;
+        for (uint32_t z=0;z<=AX_SURFACE_CELLS && shell_solid;++z) for (uint32_t y=0;y<=AX_SURFACE_CELLS && shell_solid;++y) for (uint32_t x=0;x<=AX_SURFACE_CELLS;++x) {
+            AxPosition point=origin;
+            if (!ax_position_move(&point,(double[3]){x*step,y*step,z*step})) goto cleanup;
+            bool shell=!x || !y || !z || x==AX_SURFACE_CELLS || y==AX_SURFACE_CELLS || z==AX_SURFACE_CELLS;
+            bool solid=(float)ax_planet_sample_lod(planet,&point,true)<0;
+            if (shell && !solid) { shell_solid=false; break; }
+            if (!shell && !solid) interior_air=true;
+        }
+        if (!shell_solid || !interior_air) continue;
+        if (!ax_surface_build(planet,&origin,(float)extent,AX_SURFACE_CELLS,0,0,&region)) goto cleanup;
+        if (!region.mesh.index_count) { fprintf(stderr,"cave pocket lost its mesh\n"); goto cleanup; }
+        ok=true;
+    }
+    if (!ok) fprintf(stderr,"no enclosed cave pocket found\n");
+cleanup:
+    ax_surface_destroy(&region); ax_scene_destroy(&scene); return ok;
+}
+/** Requires closed pockets the shell cannot see to keep full sampling: a brush floating wholly inside one chunk still meshes. */
+static bool enclosed_edit_meshes(void)
+{
+    AxScene scene={0}; AxSurfaceRegion region={0}; bool ok=false;
+    AxPlanetDesc desc={.id=1,.radius=1000};
+    AxVolumeEdit island={.half_extent={3,3,3},.material=AX_MATERIAL_BUILDING};
+    AxPosition origin;
+    if (!ax_scene_add_planet(&scene,&desc) || !ax_position_from_meters(&origin,(double[3]){0,1200,0}) ||
+        !ax_position_from_meters(&island.position,(double[3]){8,1208,8}) || !ax_scene_edit(&scene,1,&island) ||
+        !ax_surface_build(ax_scene_planet(&scene,1),&origin,16,16,0,0,&region)) goto cleanup;
+    ok=region.mesh.index_count>0;
+cleanup:
+    ax_surface_destroy(&region); ax_scene_destroy(&scene); return ok;
+}
 /** Validates indexed manifold extraction, smooth normals, exact-plane cases, LOD seams and failure retention. */
 int main(void)
 {
@@ -186,6 +260,9 @@ int main(void)
     CHECK(transition_width());
     CHECK(sealed_cave_seams());
     CHECK(coarse_terrain_has_no_pits());
+    CHECK(shell_matches_lattice());
+    CHECK(enclosed_edit_meshes());
+    CHECK(enclosed_cave_meshes());
     AxPlanetDesc desc={.id=1,.radius=10};
     CHECK(ax_scene_add_planet(&scene,&desc));
     const AxPlanet *planet=ax_scene_planet(&scene,1);

@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 typedef struct { struct AxStreamTask *task; size_t slot; } MeshWork;
-typedef struct { AxSurfaceRegion spec; double minimum[3],eye[3],score,root_extent; bool uniform,settled; } Leaf;
+typedef struct { AxSurfaceRegion spec; double minimum[3],eye[3],full_eye[3],score,root_extent; bool uniform,settled; } Leaf;
 /** Reports whether a leaf's own lattice spacing resolves procedural caves. */
 static bool resolves_caves(float extent)
 {
@@ -19,8 +19,10 @@ struct AxStreamTask {
     AxSurfaceRegion *next;
     size_t *borrowed;
     MeshWork *work;
-    size_t count,work_count,submitted;
-    AxPosition eye;
+    size_t count,work_count,submitted,budget;
+    AxPosition eye,full_eye;
+    bool focused;
+    double focus_extent;
     AxPlanetId frame;
     atomic_size_t remaining;
     atomic_bool success;
@@ -75,12 +77,24 @@ static uint64_t *refined_cells(const AxWorldStream *stream,const AxScene *scene)
     }
     return refined;
 }
+/** Returns the Euclidean distance from a point to a leaf's cube; zero inside it. */
+static double leaf_distance(const Leaf *leaf,const double point[3])
+{
+    double distance=0;
+    for (size_t k=0;k<3;++k) {
+        double d=fmax(leaf->minimum[k]-point[k],point[k]-leaf->minimum[k]-leaf->spec.extent);
+        if (d>0) distance+=d*d;
+    }
+    return sqrt(distance);
+}
 /** Scores a fixed cube by Euclidean camera-to-box distance.
+ * In a nearby-first layout, cubes beyond the focus radius score from the last full layout's eye, so their structure
+ * and meshes stay unchanged, and cubes within it stop at the stage's extent, so detail arrives coarse to fine.
  * Uniform proves an empty mesh at this leaf's own resolution; settled estimates that refining it would add nothing.
  * Coarse leaves still refine toward possible caves, but cave-only leaves stop once their channels are resolved.
  * Leaves larger than the body radius always refine, so distant bodies keep a round silhouette.
  */
-static void score_leaf(Leaf *leaf,const AxScene *scene,uint64_t *refined)
+static void score_leaf(Leaf *leaf,const AxScene *scene,uint64_t *refined,const AxStreamTask *task)
 {
     const AxPlanet *planet=ax_scene_planet(scene,leaf->spec.planet);
     const AxPosition zero={0};
@@ -89,14 +103,12 @@ static void score_leaf(Leaf *leaf,const AxScene *scene,uint64_t *refined)
     bool caves=resolves_caves(leaf->spec.extent);
     leaf->uniform=ax_planet_density_bounds(planet,&leaf->spec.origin,leaf->spec.extent,caves,&low,&high) && (low>0 || high<0);
     leaf->settled=!ax_planet_surface_likely(planet,&leaf->spec.origin,leaf->spec.extent,!caves);
-    double distance=0;
-    for (size_t k=0;k<3;++k) {
-        double d=fmax(leaf->minimum[k]-leaf->eye[k],leaf->eye[k]-leaf->minimum[k]-leaf->spec.extent);
-        if (d>0) distance+=d*d;
-    }
+    double distance=leaf_distance(leaf,leaf->eye);
+    bool held=task->focused && distance<=AX_STREAM_FOCUS_RADIUS && leaf->spec.extent<=task->focus_extent;
+    if (task->focused && distance>AX_STREAM_FOCUS_RADIUS) distance=leaf_distance(leaf,leaf->full_eye);
     double threshold=*refined_slot(refined,cell_key(leaf->spec.planet,leaf->spec.extent,leaf->minimum,leaf->root_extent)) ? 1.5 : 1.25;
-    leaf->score=leaf->settled || leaf->spec.extent<=AX_STREAM_MIN_EXTENT ? 0 : threshold*leaf->spec.extent/fmax(sqrt(distance),0.001);
-    if (!leaf->settled && leaf->spec.extent>AX_STREAM_MIN_EXTENT && leaf->spec.extent>ax_planet_description(planet)->radius) leaf->score=INFINITY;
+    leaf->score=held || leaf->settled || leaf->spec.extent<=AX_STREAM_MIN_EXTENT ? 0 : threshold*leaf->spec.extent/fmax(distance,0.001);
+    if (!held && !leaf->settled && leaf->spec.extent>AX_STREAM_MIN_EXTENT && leaf->spec.extent>ax_planet_description(planet)->radius) leaf->score=fmax(leaf->score,2);
 }
 typedef struct { size_t slot; Leaf leaf; } Undo;
 #define LOOKUP_SIZE (AX_WORLD_MAX_REGIONS*4u)
@@ -142,9 +154,9 @@ static size_t coarser_neighbor(LeafEntry *table,const Leaf *leaf,int x,int y,int
 /** Replaces one parent with eight children and updates the hierarchy address index.
  * @param undo Receives each overwritten slot for rollback; appended children are undone by restoring the count.
  */
-static bool split_leaf(Leaf *leaves,size_t *count,size_t index,const AxScene *scene,uint64_t *refined,LeafEntry *table,size_t *pending,size_t *pending_count,Undo *undo,size_t *undo_count)
+static bool split_leaf(Leaf *leaves,size_t *count,const AxStreamTask *task,size_t index,const AxScene *scene,uint64_t *refined,LeafEntry *table,size_t *pending,size_t *pending_count,Undo *undo,size_t *undo_count)
 {
-    if (*count+7>AX_WORLD_MAX_REGIONS || *pending_count+8>LOOKUP_SIZE || *undo_count>=AX_WORLD_MAX_REGIONS) return false;
+    if (*count+7>task->budget || *pending_count+8>LOOKUP_SIZE || *undo_count>=AX_WORLD_MAX_REGIONS) return false;
     Leaf parent=leaves[index]; LeafEntry *entry=lookup(table,&parent.spec);
     if (!entry) return false;
     undo[(*undo_count)++]=(Undo){index,parent};
@@ -153,7 +165,7 @@ static bool split_leaf(Leaf *leaves,size_t *count,size_t index,const AxScene *sc
         Leaf child=parent; child.spec.extent*=0.5f;
         double move[3]; for (size_t k=0;k<3;++k) move[k]=(c&(1u<<k)) ? child.spec.extent : 0;
         if (!ax_position_move(&child.spec.origin,move)) return false;
-        score_leaf(&child,scene,refined);
+        score_leaf(&child,scene,refined,task);
         size_t slot=c ? (*count)++ : index;
         leaves[slot]=child; entry=lookup(table,&child.spec);
         if (!entry) return false;
@@ -190,25 +202,25 @@ static bool plan(AxStreamTask *task,const AxWorldStream *stream,const AxScene *s
     for (size_t i=0;i<count;++i) {
         const AxPlanet *p=scene->planets[i];
         const AxPlanetDesc *desc=ax_planet_description(p),*a=ax_planet_description(anchor);
-        double extent=fmax(ax_planet_extent(p),AX_STREAM_MIN_EXTENT),shift[3]; AxPosition local=*eye;
+        double extent=fmax(ax_planet_extent(p),AX_STREAM_MIN_EXTENT),shift[3]; AxPosition local=*eye,full=task->full_eye;
         for (size_t k=0;k<3;++k) shift[k]=a->center[k]-desc->center[k];
-        if (!isfinite(extent) || extent<AX_STREAM_MIN_EXTENT || !ax_position_move(&local,shift)) goto done;
-        const AxPosition zero={0}; ax_position_difference(&local,&zero,leaves[i].eye);
+        if (!isfinite(extent) || extent<AX_STREAM_MIN_EXTENT || !ax_position_move(&local,shift) || !ax_position_move(&full,shift)) goto done;
+        const AxPosition zero={0}; ax_position_difference(&local,&zero,leaves[i].eye); ax_position_difference(&full,&zero,leaves[i].full_eye);
         leaves[i].spec=(AxSurfaceRegion){.planet=desc->id,.revision=ax_planet_revision(p),.extent=(float)extent,.cells=AX_SURFACE_CELLS};
         if (!ax_position_from_meters(&leaves[i].spec.origin,(double[3]){-extent/2,-extent/2,-extent/2})) goto done;
         leaves[i].root_extent=extent;
-        score_leaf(&leaves[i],scene,refined);
+        score_leaf(&leaves[i],scene,refined,task);
         LeafEntry *entry=lookup(table,&leaves[i].spec);
         if (!entry) goto done;
         *entry=(LeafEntry){.origin=leaves[i].spec.origin,.planet=desc->id,.extent=(float)extent,.index=i};
     }
-    while (count+7<=AX_WORLD_MAX_REGIONS) {
+    while (count+7<=task->budget) {
         size_t best=SIZE_MAX; double score=1;
         for (size_t i=0;i<count;++i) if (leaves[i].score>score) { best=i; score=leaves[i].score; }
         if (best==SIZE_MAX) break;
         size_t previous_count=count;
         size_t pending_count=0,undo_count=0;
-        bool balanced=split_leaf(leaves,&count,best,scene,refined,table,pending,&pending_count,undo,&undo_count);
+        bool balanced=split_leaf(leaves,&count,task,best,scene,refined,table,pending,&pending_count,undo,&undo_count);
         for (size_t q=0;balanced && q<pending_count;++q) {
             Leaf fine=leaves[pending[q]];
             if (fine.settled) continue;
@@ -216,7 +228,7 @@ static bool plan(AxStreamTask *task,const AxWorldStream *stream,const AxScene *s
                 if (!x && !y && !z) continue;
                 size_t coarse=coarser_neighbor(table,&fine,x,y,z);
                 while (coarse!=SIZE_MAX && !leaves[coarse].uniform && leaves[coarse].spec.extent>fine.spec.extent*2) {
-                    balanced=split_leaf(leaves,&count,coarse,scene,refined,table,pending,&pending_count,undo,&undo_count);
+                    balanced=split_leaf(leaves,&count,task,coarse,scene,refined,table,pending,&pending_count,undo,&undo_count);
                     if (!balanced) break;
                     coarse=coarser_neighbor(table,&fine,x,y,z);
                 }
@@ -248,9 +260,14 @@ static bool plan(AxStreamTask *task,const AxWorldStream *stream,const AxScene *s
         task->next[i]=spec; task->borrowed[i]=SIZE_MAX;
         if (scene->epoch==stream->epoch) for (size_t j=0;j<stream->count;++j) {
             const AxSurfaceRegion *old=&stream->regions[j];
-            if (old->planet==spec.planet && old->revision==spec.revision && old->extent==spec.extent && old->transition_faces==spec.transition_faces && old->sealed_neighbors==spec.sealed_neighbors && same_origin(&old->origin,&spec.origin)) {
-                task->borrowed[i]=j; task->next[i]=*old; break;
+            if (old->planet!=spec.planet || old->revision!=spec.revision || old->extent!=spec.extent || !same_origin(&old->origin,&spec.origin)) continue;
+            bool same_stitching=old->transition_faces==spec.transition_faces && old->sealed_neighbors==spec.sealed_neighbors;
+            bool still_empty=!old->mesh.index_count && (old->sealed_neighbors==spec.sealed_neighbors || !resolves_caves(spec.extent));
+            if (same_stitching || still_empty) {
+                task->borrowed[i]=j; task->next[i]=*old;
+                task->next[i].transition_faces=spec.transition_faces; task->next[i].sealed_neighbors=spec.sealed_neighbors;
             }
+            break;
         }
         if (task->borrowed[i]==SIZE_MAX) task->work[task->work_count++]=(MeshWork){task,i};
     }
@@ -289,6 +306,14 @@ static void destroy_task(AxStreamTask *task)
     if (task->next && task->borrowed) for (size_t i=0;i<task->count;++i) if (task->borrowed[i]==SIZE_MAX) ax_surface_destroy(&task->next[i]);
     free(task->next); free(task->borrowed); free(task->work); ax_scene_destroy(&task->snapshot); free(task);
 }
+/** Records a finished layout: its budget stage, and whether a full layout must still follow a nearby-first one. */
+static void finish_layout(AxWorldStream *stream,const AxStreamTask *task)
+{
+    stream->finished_budget=task->budget;
+    stream->focused=task->focused;
+    stream->focus_extent=task->focused ? task->focus_extent : 0;
+    if (!task->focused) stream->full_eye=task->eye;
+}
 /** Transfers a coherent cut and relinquishes each borrowed mesh from the old cut. */
 static void commit(AxWorldStream *stream,AxStreamTask *task)
 {
@@ -296,6 +321,7 @@ static void commit(AxWorldStream *stream,AxStreamTask *task)
     for (size_t i=0;i<stream->count;++i) ax_surface_destroy(&stream->regions[i]);
     free(stream->regions); stream->regions=task->next; task->next=NULL;
     stream->count=task->count; stream->source_count=task->snapshot.count; stream->epoch=task->snapshot.epoch; stream->planned_eye=task->eye; stream->planned_frame=task->frame; stream->dirty=true;
+    finish_layout(stream,task);
 }
 /** Checks all source revisions before publishing asynchronous geometry. */
 static bool current_sources(const AxScene *scene,const AxStreamTask *task)
@@ -325,12 +351,36 @@ static void submit_plan(AxStreamTask *task,AxJobs *jobs)
     else build_plan(task);
     task->planning_submitted=true;
 }
+/** Chooses the next nearby-first stage, two levels finer than the last, or finer than the leaf now around the camera.
+ * Returns zero when a full layout is due: for short moves, after a frame or scene change, or once stages reach their floor.
+ */
+static double next_focus_extent(const AxWorldStream *stream,const AxScene *scene,AxPlanetId frame,const AxPosition *eye)
+{
+    if (!stream->count || stream->finished_budget<AX_WORLD_MAX_REGIONS || frame!=stream->planned_frame || scene->epoch!=stream->epoch) return 0;
+    double next=stream->focus_extent*0.25;
+    if (!stream->focused) {
+        double travel[3]; ax_position_difference(eye,&stream->full_eye,travel);
+        if (hypot(hypot(travel[0],travel[1]),travel[2])<AX_STREAM_FOCUS_TRAVEL) return 0;
+        double around=0;
+        for (size_t i=0;i<stream->count;++i) {
+            const AxSurfaceRegion *r=&stream->regions[i];
+            double relative[3]; ax_position_difference(eye,&r->origin,relative);
+            if (r->planet==frame && relative[0]>=0 && relative[1]>=0 && relative[2]>=0 && relative[0]<r->extent && relative[1]<r->extent && relative[2]<r->extent) around=r->extent;
+        }
+        next=around*0.25;
+    }
+    return next>=AX_STREAM_FOCUS_MIN_EXTENT ? next : 0;
+}
 /** Captures stable metadata and immutable source data before asynchronous planning starts. */
 static AxStreamTask *new_task(const AxWorldStream *stream,const AxScene *scene,AxPlanetId frame,const AxPosition *eye)
 {
     AxStreamTask *task=calloc(1,sizeof(*task));
     if (!task) return NULL;
     task->previous=*stream; task->frame=frame; task->eye=*eye;
+    task->budget=!stream->finished_budget ? AX_STREAM_BOOTSTRAP_LEAVES : stream->finished_budget>=AX_WORLD_MAX_REGIONS/4 ? AX_WORLD_MAX_REGIONS : stream->finished_budget*4;
+    task->full_eye=*eye;
+    task->focus_extent=next_focus_extent(stream,scene,frame,eye);
+    if (task->focus_extent>0) { task->focused=true; task->full_eye=stream->full_eye; }
     atomic_init(&task->success,true); atomic_init(&task->remaining,0); atomic_init(&task->planned,false);
     if (!ax_scene_clone(scene,&task->snapshot)) { destroy_task(task); return NULL; }
     return task;
@@ -362,14 +412,14 @@ bool ax_world_stream_update(AxWorldStream *stream,const AxScene *scene,AxPlanetI
         if (atomic_load_explicit(&task->remaining,memory_order_acquire)) return true;
         bool ok=atomic_load_explicit(&task->success,memory_order_relaxed);
         if (ok && current_sources(scene,task)) {
-            if (!task->work_count && task->count==stream->count) { stream->planned_eye=task->eye; stream->planned_frame=task->frame; }
+            if (!task->work_count && task->count==stream->count) { stream->planned_eye=task->eye; stream->planned_frame=task->frame; finish_layout(stream,task); }
             else commit(stream,task);
         }
         destroy_task(task); stream->task=NULL;
         if (!ok) return false;
     }
     double delta[3]; ax_position_difference(eye,&stream->planned_eye,delta);
-    bool changed=scene->count!=stream->source_count || scene->epoch!=stream->epoch || frame!=stream->planned_frame || hypot(hypot(delta[0],delta[1]),delta[2])>=AX_STREAM_REPLAN_DISTANCE;
+    bool changed=stream->focused || stream->finished_budget<AX_WORLD_MAX_REGIONS || scene->count!=stream->source_count || scene->epoch!=stream->epoch || frame!=stream->planned_frame || hypot(hypot(delta[0],delta[1]),delta[2])>=AX_STREAM_REPLAN_DISTANCE;
     for (size_t i=0;i<stream->count && !changed;++i) {
         const AxPlanet *p=ax_scene_planet(scene,stream->regions[i].planet);
         if (!p || ax_planet_revision(p)!=stream->regions[i].revision) changed=true;
@@ -379,6 +429,10 @@ bool ax_world_stream_update(AxWorldStream *stream,const AxScene *scene,AxPlanetI
     if (!task) return false;
     stream->task=task; submit_plan(task,jobs);
     return true;
+}
+bool ax_world_stream_refining(const AxWorldStream *stream)
+{
+    return stream && (stream->task || stream->focused || stream->finished_budget<AX_WORLD_MAX_REGIONS);
 }
 void ax_world_stream_destroy(AxWorldStream *stream,AxJobs *jobs)
 {

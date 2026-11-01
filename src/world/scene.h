@@ -76,6 +76,12 @@ bool ax_planet_density_bounds(const AxPlanet *planet,const AxPosition *origin,do
  */
 bool ax_planet_surface_likely(const AxPlanet *planet,const AxPosition *origin,double extent,bool caves);
 
+/** Reports whether terrain inside a cube is a radial surface, which must cross the cube boundary to enter it.
+ * True only when the cube excludes the planet center and no edit can form a closed pocket inside it. Procedural
+ * caves are not considered; they form pockets only inside rock, so a caller must treat a solid boundary accordingly.
+ */
+bool ax_planet_surface_crosses_boundary(const AxPlanet *planet,const AxPosition *origin,double extent);
+
 /** Returns unedited radial terrain displacement at a planet-local position. */
 double ax_planet_terrain_height(const AxPlanet *planet,const double position[3]);
 

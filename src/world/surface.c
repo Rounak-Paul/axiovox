@@ -225,6 +225,39 @@ static bool build_transitions(Builder *b)
     }
     return true;
 }
+/** Samples one lattice point into the density grid; rejects values outside the mesh's float range. */
+static bool fill_sample(Builder *b,int x,int y,int z)
+{
+    double p[3]={x*b->step,y*b->step,z*b->step};
+    AxPosition position=b->origin;
+    double value=ax_position_move(&position,p) ? ax_planet_sample_lod(b->planet,&position,sample_carves(b,x,y,z)) : INFINITY;
+    if (!isfinite(value) || fabs(value)>3e38) return false;
+    b->density[grid_index(b,x,y,z)]=(float)value;
+    return true;
+}
+/** Reports whether a point lies on the outer shell of the meshing domain, which neighbors share. */
+static bool on_shell(const Builder *b,int x,int y,int z)
+{
+    int cells=(int)b->cells;
+    return x>=0 && y>=0 && z>=0 && x<=cells && y<=cells && z<=cells && (x==0 || y==0 || z==0 || x==cells || y==cells || z==cells);
+}
+/** Samples the shared shell, reporting whether the chunk interior can be skipped.
+ * Terrain leaving a chunk must change sign across this shell, so a uniform shell yields no mesh and no neighbor can crack.
+ * A solid shell may still enclose a cave pocket wherever caves are carved, so only an all-air shell is empty there.
+ * @param empty Receives true when the chunk has no surface.
+ */
+static bool sample_shell(Builder *b,bool *empty)
+{
+    int cells=(int)b->cells;
+    bool any_solid=false,any_air=false;
+    for (int z=0;z<=cells;++z) for (int y=0;y<=cells;++y) for (int x=0;x<=cells;++x) {
+        if (!on_shell(b,x,y,z)) continue;
+        if (!fill_sample(b,x,y,z)) return false;
+        if (b->density[grid_index(b,x,y,z)]<0) any_solid=true; else any_air=true;
+    }
+    *empty=!any_solid || (!any_air && !(b->caves && ax_planet_description(b->planet)->cave_depth>0));
+    return true;
+}
 bool ax_surface_build(const AxPlanet *planet, const AxPosition *origin, float extent,
                       uint32_t cells, uint8_t transition_faces, uint32_t sealed_neighbors, AxSurfaceRegion *region)
 {
@@ -236,10 +269,11 @@ bool ax_surface_build(const AxPlanet *planet, const AxPosition *origin, float ex
     const AxPlanetDesc *desc=ax_planet_description(planet);
     double minimum,maximum;
     if (!ax_planet_density_bounds(planet,&b.origin,extent,b.caves,&minimum,&maximum)) return false;
+    AxSurfaceRegion empty={.planet=desc->id,.origin=b.origin,.revision=ax_planet_revision(planet),
+        .extent=extent,.cells=cells,.transition_faces=transition_faces,.sealed_neighbors=sealed_neighbors};
     if (minimum>0 || maximum<0) {
         ax_surface_destroy(region);
-        *region=(AxSurfaceRegion){.planet=desc->id,.origin=b.origin,.revision=ax_planet_revision(planet),
-            .extent=extent,.cells=cells,.transition_faces=transition_faces,.sealed_neighbors=sealed_neighbors};
+        *region=empty;
         return true;
     }
     size_t count=(size_t)b.side*b.side*b.side;
@@ -247,13 +281,19 @@ bool ax_surface_build(const AxPlanet *planet, const AxPosition *origin, float ex
     bool success=false;
     if (!b.density || !b.cache) goto cleanup;
     memset(b.cache,255,count*4*sizeof(uint32_t));
-    for (int z=-2;z<=(int)cells+2;++z) for (int y=-2;y<=(int)cells+2;++y) for (int x=-2;x<=(int)cells+2;++x) {
-        double p[3]={x*b.step,y*b.step,z*b.step};
-        AxPosition position=b.origin;
-        double value=ax_position_move(&position,p) ? ax_planet_sample_lod(planet,&position,sample_carves(&b,x,y,z)) : INFINITY;
-        if (!isfinite(value) || fabs(value)>3e38) goto cleanup;
-        b.density[grid_index(&b,x,y,z)]=(float)value;
+    bool shell_sampled=ax_planet_surface_crosses_boundary(planet,&b.origin,extent);
+    if (shell_sampled) {
+        bool no_surface=false;
+        if (!sample_shell(&b,&no_surface)) goto cleanup;
+        if (no_surface) {
+            ax_surface_destroy(region);
+            *region=empty;
+            success=true;
+            goto cleanup;
+        }
     }
+    for (int z=-2;z<=(int)cells+2;++z) for (int y=-2;y<=(int)cells+2;++y) for (int x=-2;x<=(int)cells+2;++x)
+        if (!(shell_sampled && on_shell(&b,x,y,z)) && !fill_sample(&b,x,y,z)) goto cleanup;
     if (!regular_cells(&b) || (transition_faces && !build_transitions(&b))) goto cleanup;
     ax_surface_destroy(region);
     *region=(AxSurfaceRegion){.mesh=b.mesh,.planet=ax_planet_description(planet)->id,.origin=b.origin,

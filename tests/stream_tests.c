@@ -7,10 +7,10 @@
 /** Completes bounded submissions and coherent publication, including a replacement after stale work. */
 static bool settle(AxWorldStream *stream,const AxScene *scene,const AxPosition *eye,AxJobs *jobs)
 {
-    for (size_t i=0;i<64;++i) {
+    for (size_t i=0;i<256;++i) {
         if (!ax_world_stream_update(stream,scene,1,eye,jobs)) return false;
-        if (!stream->task) return true;
-        ax_jobs_wait(jobs);
+        if (!ax_world_stream_refining(stream)) return true;
+        if (jobs) ax_jobs_wait(jobs);
     }
     return false;
 }
@@ -49,6 +49,45 @@ static bool valid_cut(const AxWorldStream *stream)
     }
     return true;
 }
+typedef struct { int64_t a[3],b[3]; int direction; } WeldEdge;
+/** Orders welded edges by endpoints, so matching pairs sort together. */
+static int compare_weld(const void *x,const void *y)
+{
+    const WeldEdge *a=x,*b=y;
+    for (size_t k=0;k<3;++k) if (a->a[k]!=b->a[k]) return a->a[k]<b->a[k] ? -1 : 1;
+    for (size_t k=0;k<3;++k) if (a->b[k]!=b->b[k]) return a->b[k]<b->b[k] ? -1 : 1;
+    return 0;
+}
+/** Counts welded edges of one body's published cut lacking an opposite-facing partner; any such edge is a visible crack. */
+static size_t open_edges(const AxWorldStream *stream,AxPlanetId planet)
+{
+    size_t total=0,open=0,n=0; const AxPosition zero={0};
+    for (size_t i=0;i<stream->count;++i) if (stream->regions[i].planet==planet) total+=stream->regions[i].mesh.index_count;
+    WeldEdge *edges=malloc((total ? total : 1)*sizeof(*edges));
+    if (!edges) return SIZE_MAX;
+    for (size_t i=0;i<stream->count;++i) {
+        const AxSurfaceRegion *r=&stream->regions[i];
+        if (r->planet!=planet) continue;
+        double origin[3]; ax_position_difference(&r->origin,&zero,origin);
+        for (size_t t=0;t<r->mesh.index_count;t+=3) for (size_t j=0;j<3;++j) {
+            const float *p=r->mesh.vertices[r->mesh.indices[t+j]].position,*q=r->mesh.vertices[r->mesh.indices[t+(j+1)%3]].position;
+            WeldEdge e={.direction=1}; bool reverse=false,decided=false;
+            for (size_t k=0;k<3;++k) { e.a[k]=llround((origin[k]+p[k])*1000); e.b[k]=llround((origin[k]+q[k])*1000); }
+            for (size_t k=0;k<3 && !decided;++k) if (e.a[k]!=e.b[k]) { reverse=e.a[k]>e.b[k]; decided=true; }
+            if (!decided) continue;
+            if (reverse) { e.direction=-1; for (size_t k=0;k<3;++k) { int64_t s=e.a[k]; e.a[k]=e.b[k]; e.b[k]=s; } }
+            edges[n++]=e;
+        }
+    }
+    qsort(edges,n,sizeof(*edges),compare_weld);
+    for (size_t i=0;i<n;) {
+        size_t j=i+1; int sum=edges[i].direction;
+        while (j<n && !compare_weld(&edges[i],&edges[j])) sum+=edges[j++].direction;
+        if (sum) ++open;
+        i=j;
+    }
+    free(edges); return open;
+}
 /** Verifies deterministic parallel meshing, lateral distance LOD, both bodies, edits and stale snapshots. */
 int main(void)
 {
@@ -60,6 +99,21 @@ int main(void)
     AxPosition eye; CHECK(ax_position_from_meters(&eye,(double[3]){1,132,1}));
     CHECK(ax_world_stream_create(&stream,&scene,1,&eye,jobs));
     CHECK(ax_world_stream_create(&serial,&scene,1,&eye,NULL));
+    CHECK(stream.count<=AX_STREAM_BOOTSTRAP_LEAVES && ax_world_stream_refining(&stream));
+    float bootstrap=extent_at(&stream,1,(double[3]){1,128,1});
+    CHECK(isfinite(bootstrap) && bootstrap<ax_planet_extent(ax_scene_planet(&scene,1)));
+    size_t bootstrap_count=stream.count;
+    CHECK(settle(&stream,&scene,&eye,jobs) && settle(&serial,&scene,&eye,NULL));
+    CHECK(stream.count>bootstrap_count && extent_at(&stream,1,(double[3]){1,128,1})<=bootstrap);
+    CHECK(open_edges(&stream,1)==0 && open_edges(&stream,2)==0);
+    CHECK(stream.finished_budget==AX_WORLD_MAX_REGIONS);
+    CHECK(ax_world_stream_update(&stream,&scene,1,&eye,jobs) && !stream.task);
+    {
+        AxWorldStream interrupted={0};
+        CHECK(ax_world_stream_create(&interrupted,&scene,1,&eye,jobs));
+        CHECK(ax_world_stream_update(&interrupted,&scene,1,&eye,jobs) && interrupted.task);
+        ax_world_stream_destroy(&interrupted,jobs);
+    }
     CHECK(stream.count==serial.count && stream.count<=AX_WORLD_MAX_REGIONS);
     for (size_t i=0;i<stream.count;++i) {
         const AxSurfaceMesh *a=&stream.regions[i].mesh,*b=&serial.regions[i].mesh;
@@ -74,9 +128,15 @@ int main(void)
     CHECK(ax_world_geometry_build(&scene,stream.regions,stream.count,&geometry));
     CHECK(geometry.count==stream.count);
     for (size_t i=0;i<geometry.count;++i) CHECK((size_t)geometry.regions[i].first_index+geometry.regions[i].index_count<=geometry.index_count);
+    float departed=extent_at(&stream,1,(double[3]){1,128,1});
     CHECK(ax_position_move(&eye,(double[3]){160,0,0}));
+    CHECK(ax_world_stream_update(&stream,&scene,1,&eye,jobs) && stream.task);
+    for (size_t i=0;i<256 && !stream.focused;++i) { ax_jobs_wait(jobs); CHECK(ax_world_stream_update(&stream,&scene,1,&eye,jobs)); }
+    CHECK(stream.focused && stream.focus_extent>=AX_STREAM_FOCUS_MIN_EXTENT && valid_cut(&stream) && ax_world_stream_refining(&stream));
+    CHECK(extent_at(&stream,1,(double[3]){1,128,1})==departed);
+    CHECK(open_edges(&stream,1)==0);
     CHECK(settle(&stream,&scene,&eye,jobs));
-    CHECK(valid_cut(&stream));
+    CHECK(!stream.focused && valid_cut(&stream) && open_edges(&stream,1)==0);
     float far=extent_at(&stream,1,(double[3]){1,128,1}); CHECK(far>near);
     CHECK(ax_position_move(&eye,(double[3]){-160,0,0}));
     CHECK(settle(&stream,&scene,&eye,jobs)); CHECK(extent_at(&stream,1,(double[3]){1,128,1})<far);
