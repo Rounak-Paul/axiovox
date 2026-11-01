@@ -22,6 +22,9 @@ int main(void)
     AxConsole console;
     CHECK(ax_console_init(&console, &commands, &input, &events));
     AxHud hud = {0};
+    AxConfig settings;
+    ax_config_init(&settings, &events);
+    ax_menu_bind(&hud.menu, &settings, NULL, &commands, NULL, 0);
     CHECK(ax_hud_configure(&hud, 2, 3));
     ax_input_key(&input, AX_KEY_9, true, false, 0);
     ax_hud_update(&hud, &input, &console, 0, 1280, 720);
@@ -117,6 +120,24 @@ int main(void)
         ax_input_mouse_button(&input, 0, true);
         ax_hud_update(&hud, &input, &console, 2, 1280, 720);
         CHECK(console.open);
+    }
+    ax_console_open(&console, false);
+    hud.paused = true;
+    for (int level = 1; level <= 5; ++level) {
+        CHECK(ax_hud_configure(&hud, level, 3));
+        float scale = ax_hud_scale(&hud);
+        for (size_t i = 0; i < 4; ++i) for (int page = 0; page < 4; ++page) {
+            ax_menu_open_pause(&hud.menu);
+            if (page) { CHECK(ax_menu_open_settings(&hud.menu)); hud.menu.category = (AxSettingsCategory)(page - 1); }
+            AxUiCanvas canvas = {.vertices = vertices, .capacity = 65536, .font = &font, .width = sizes[i][0] / scale, .height = sizes[i][1] / scale};
+            ax_hud_draw(&hud, &canvas, &console, 2);
+            CHECK(canvas.count && canvas.count <= canvas.capacity && canvas.count % 6 == 0);
+            for (uint32_t v = 0; v < canvas.count; ++v) {
+                CHECK(isfinite(vertices[v].x) && isfinite(vertices[v].y));
+                CHECK(vertices[v].x >= 0 && vertices[v].x <= canvas.width);
+                CHECK(vertices[v].y >= 0 && vertices[v].y <= canvas.height);
+            }
+        }
     }
     AxUiCanvas limited = {vertices, 0, 5, &font, 1280, 720};
     ax_hud_draw(&hud, &limited, &console, 2);

@@ -1,6 +1,7 @@
 #include "core/command.h"
 #include "core/config.h"
 #include "core/jobs.h"
+#include "core/files.h"
 #include "core/log.h"
 #include "renderer/renderer.h"
 #include "ui/ui.h"
@@ -16,6 +17,7 @@ typedef struct {
     AxCommands commands;
     AxRenderer renderer;
     AxUi ui;
+    char settings_path[AX_PATH_CAPACITY];
 } Application;
 /** Applies validated global scale and hotbar rows to the current HUD. */
 static bool configure_hud(Application *app)
@@ -92,16 +94,21 @@ int main(int argc, char **argv)
     Application app = {0};
     AxJobs *jobs = NULL;
     int status = EXIT_FAILURE;
-    bool smoke = false;
+    bool smoke = false, custom_config = false;
     ax_config_init(&app.config, &events);
+    if (!ax_settings_path(app.settings_path, sizeof(app.settings_path))) ax_log(AX_LOG_WARN, "User settings directory is unavailable");
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--smoke-test")) smoke = true;
         else if (!strcmp(argv[i], "--config") && i + 1 < argc) {
-            if (!ax_config_load(&app.config, argv[++i])) { ax_log(AX_LOG_ERROR, "Invalid config: %s", argv[i]); goto cleanup; }
+            const char *path = argv[++i];
+            if (strlen(path) >= sizeof(app.settings_path) || !ax_config_load(&app.config, path)) { ax_log(AX_LOG_ERROR, "Invalid config: %s", path); goto cleanup; }
+            strcpy(app.settings_path, path);
+            custom_config = true;
         } else if (!strcmp(argv[i], "--command") && i + 1 < argc) ++i;
         else { ax_log(AX_LOG_ERROR, "Usage: axiovox [--config path] [--command text] [--smoke-test]"); goto cleanup; }
     }
-    app.config.restart_pending = false;
+    if (!custom_config && app.settings_path[0] && ax_file_exists(app.settings_path) && !ax_config_load(&app.config, app.settings_path))
+        ax_log(AX_LOG_WARN, "Could not load user settings; using defaults");
     ax_log_set_level((AxLogLevel)ax_config_get(&app.config, "log.level")->value);
     if (!ax_event_subscribe(&events, AX_EVENT_CONFIG_CHANGED, config_changed, &app) ||
         !ax_event_subscribe(&events, AX_EVENT_DEVICE_SELECTED, device_selected, NULL)) goto cleanup;
@@ -119,6 +126,8 @@ int main(int argc, char **argv)
     if (!ax_renderer_create(&app.renderer, &app.window, &events, ax_config_get(&app.config, "renderer.device")->value)) goto cleanup;
     if (!ax_ui_create(&app.ui, &app.renderer, &app.console)) { ax_log(AX_LOG_ERROR, "UI initialization failed"); goto cleanup; }
     if (!configure_hud(&app)) goto cleanup;
+    ax_ui_bind_settings(&app.ui, &app.config, app.settings_path);
+    ax_config_mark_applied(&app.config);
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--config")) ++i;
         else if (!strcmp(argv[i], "--command")) {
@@ -130,6 +139,13 @@ int main(int argc, char **argv)
     while (!glfwWindowShouldClose(app.window.handle)) {
         ax_input_begin_frame(&app.input);
         glfwPollEvents();
+        if (smoke && frames == 2) {
+            ax_console_open(&app.console, false);
+            ax_input_key(&app.input, AX_KEY_ESCAPE, true, false, 0);
+            ax_input_key(&app.input, AX_KEY_ESCAPE, false, false, 0);
+        }
+        if (smoke && frames == 4) ax_menu_open_settings(&app.ui.hud.menu);
+        if (smoke && frames == 6) app.ui.hud.menu.category = AX_SETTINGS_VIDEO;
         ax_ui_update(&app.ui, glfwGetTime());
         if (!ax_renderer_draw(&app.renderer)) { ax_log(AX_LOG_ERROR, "Frame rendering failed"); goto cleanup; }
         if (smoke && ++frames == 8) break;

@@ -94,12 +94,19 @@ bool ax_renderer_create(AxRenderer *renderer, AxWindow *window, AxEvents *events
     VkPhysicalDevice *devices = calloc(count, sizeof(*devices));
     if (!devices) goto fail;
     result = vkEnumeratePhysicalDevices(renderer->instance, &count, devices);
+    renderer->devices = calloc(count, sizeof(*renderer->devices));
+    if (!renderer->devices) { free(devices); goto fail; }
+    renderer->device_count = count;
     int best_score = -1;
     if (result == VK_SUCCESS) for (uint32_t i = 0; i < count; ++i) {
         VkPhysicalDeviceProperties properties;
         vkGetPhysicalDeviceProperties(devices[i], &properties);
         uint32_t graphics, present;
         bool compatible = suitable(devices[i], renderer->surface, &graphics, &present, renderer->api_version);
+        renderer->devices[i].index = i;
+        renderer->devices[i].compatible = compatible;
+        memcpy(renderer->devices[i].name, properties.deviceName, AX_DEVICE_NAME_CAPACITY);
+        renderer->devices[i].name[AX_DEVICE_NAME_CAPACITY - 1] = 0;
         ax_log(AX_LOG_INFO, "GPU %u: %s (%s)", i, properties.deviceName, compatible ? "compatible" : "incompatible");
         if (!compatible || (preferred_index >= 0 && i != (uint32_t)preferred_index)) continue;
         int score = properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 400 :
@@ -152,5 +159,6 @@ void ax_renderer_destroy(AxRenderer *renderer)
     if (renderer->device) { vkDeviceWaitIdle(renderer->device); ax_renderer_frames_destroy(renderer); vkDestroyDevice(renderer->device, NULL); }
     if (renderer->surface) vkDestroySurfaceKHR(renderer->instance, renderer->surface, NULL);
     if (renderer->instance) vkDestroyInstance(renderer->instance, NULL);
+    free(renderer->devices);
     *renderer = (AxRenderer){0};
 }

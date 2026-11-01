@@ -25,7 +25,7 @@ All generators, including Visual Studio, put the game directly in project-root
 files stay in the build tree. The selected configuration overwrites the same game
 output, so build Release last before publishing and do not build different trees
 into `bin/` concurrently. Shaders and the font remain embedded; source assets are
-also staged locally. `--smoke-test` renders eight frames with the console open.
+also staged locally. `--smoke-test` renders eight frames across the console, pause menu, and settings screens.
 Set `-DAXIOVOX_TEST_GPU=ON` to include display/GPU tests in CTest.
 
 ## Shipping
@@ -79,6 +79,33 @@ with the other configuration values. The hotbar has no separate size setting.
 /ui.hotbar.rows 4
 ```
 
+## Pause and settings
+
+The pause icon or Escape opens a centered **AXIOVOX** pause menu with Resume,
+Settings, and Quit game. Gameplay input is captured while menus are open. Mouse
+buttons activate on release inside the pressed control; keyboard navigation also
+works, without displaying generic key-help captions. Escape returns from Settings
+to Pause, then resumes from Pause. Closing a console over a paused game keeps it
+paused.
+
+Settings are grouped into Interface (UI scale/hotbar rows), Video (window resolution
+and detected compatible graphics devices), and System (worker threads/log verbosity).
+Edits are staged: **Apply** saves and applies them, **Done** saves and returns, and
+**Cancel** discards pending edits. **Reset all** restores defaults in the draft.
+Interface/window/log changes apply without restart. GPU and worker-count changes
+are marked as requiring restart, with pending status cleared if reverted to the
+startup-applied value. Runtime command changes are merged into untouched form fields.
+
+Settings are written atomically and loaded at the next launch:
+
+- macOS: `~/Library/Application Support/Axiovox/settings.cfg`
+- Windows: `%LOCALAPPDATA%/Axiovox/settings.cfg`
+- Linux: `$XDG_CONFIG_HOME/axiovox/settings.cfg`, or `~/.config/axiovox/settings.cfg`
+
+`--config path` uses that file instead for menu saves. A failed save leaves the
+existing settings and pending draft intact and displays an error. User preferences
+are separate from the publishable `bin/` directory.
+
 ## Console and runtime commands
 
 Press `/` to open the console with all commands listed alphabetically. Typing
@@ -119,7 +146,8 @@ Device `-1` auto-selects; other indices refer to the current GPU enumeration and
 are not stable hardware identifiers. Unavailable explicit selections fail startup.
 
 Config files contain `key=value` lines, blank lines, or `#` comments; no whitespace
-around keys. Loading validates the entire file before changing settings.
+around keys. Loading validates the entire file before changing settings, then commits all values
+before emitting change events.
 
 ```sh
 ./bin/axiovox --config game.cfg --command "window.width 1600"

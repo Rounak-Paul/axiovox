@@ -26,3 +26,6 @@ void ax_ui_destroy(AxUi *ui);
 
 /** Updates HUD input and feedback before recording a frame; owner-thread only. */
 void ax_ui_update(AxUi *ui, double time);
+
+/** Connects menu editing/persistence to the application's config; all arguments are borrowed. */
+void ax_ui_bind_settings(AxUi *ui, AxConfig *config, const char *settings_path);

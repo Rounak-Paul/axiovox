@@ -1,9 +1,11 @@
 #pragma once
 #include "draw.h"
 #include "console.h"
+#include "menu.h"
 typedef struct {
     unsigned selected_slots[9], active_row, row_count, scale_level;
     bool paused;
+    AxMenu menu;
     uint64_t output_revision;
     double output_time, scroll_remainder;
 } AxHud;

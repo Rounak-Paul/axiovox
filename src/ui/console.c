@@ -134,11 +134,14 @@ static void key_event(const AxEvent *event, void *user)
         if (event->data.key.key == AX_KEY_SLASH && !event->data.key.repeat && !event->data.key.modifiers) {
             ax_console_open(console, true);
             console->opening_key_text = true;
+            console->input->consumed[AX_KEY_SLASH] = true;
         }
         return;
     }
+    if (event->data.key.key <= AX_KEY_UNKNOWN || event->data.key.key >= AX_KEY_COUNT) return;
+    console->input->consumed[event->data.key.key] = true;
     switch ((AxKey)event->data.key.key) {
-    case AX_KEY_ESCAPE: console->input->consumed[AX_KEY_ESCAPE] = true; ax_console_open(console, false); break;
+    case AX_KEY_ESCAPE: ax_console_open(console, false); break;
     case AX_KEY_ENTER: if (!event->data.key.repeat) enter(console); break;
     case AX_KEY_TAB:
         if (event->data.key.modifiers & AX_MOD_SHIFT) move_suggestion(console, true);

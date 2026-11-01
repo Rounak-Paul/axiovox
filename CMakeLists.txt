@@ -26,6 +26,7 @@ add_library(axiovox_core STATIC
     src/core/log.c
     src/core/event.c
     src/core/config.c
+    src/core/files.c
     src/core/command.c
     src/core/input.c
     src/core/jobs.c
@@ -70,7 +71,7 @@ target_link_libraries(axiovox_platform PUBLIC axiovox_core Vulkan::Headers ${AXI
 add_library(axiovox_renderer STATIC src/renderer/renderer.c src/renderer/frame.c src/renderer/memory.c)
 target_link_libraries(axiovox_renderer PUBLIC axiovox_platform)
 
-add_library(axiovox_ui_layout STATIC src/ui/draw.c src/ui/hud.c)
+add_library(axiovox_ui_layout STATIC src/ui/draw.c src/ui/hud.c src/ui/menu.c)
 target_link_libraries(axiovox_ui_layout PUBLIC axiovox_console axiovox_font)
 
 add_library(axiovox_ui STATIC src/ui/ui.c "${generated_dir}/ui.vert.inc" "${generated_dir}/ui.frag.inc")
@@ -126,6 +127,12 @@ if(BUILD_TESTING)
     set_target_properties(axiovox_ui_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
     add_test(NAME ui COMMAND axiovox_ui_tests)
     set_tests_properties(ui PROPERTIES TIMEOUT 30)
+
+    add_executable(axiovox_menu_tests tests/menu_tests.c)
+    target_link_libraries(axiovox_menu_tests PRIVATE axiovox_ui_layout)
+    set_target_properties(axiovox_menu_tests PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    add_test(NAME menu COMMAND axiovox_menu_tests)
+    set_tests_properties(menu PROPERTIES TIMEOUT 30)
 
     add_executable(axiovox_renderer_tests tests/renderer_tests.c)
     target_link_libraries(axiovox_renderer_tests PRIVATE axiovox_renderer)

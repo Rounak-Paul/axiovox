@@ -30,3 +30,5 @@ all five scale hit-test transforms, nine rows, clipped vertices at four viewport
 sizes, and vertex-capacity exhaustion. GPU smoke also passed with ui.scale=5 and
 ui.hotbar.rows=9. bin/axiovox is the only game executable. git diff --check passed.
 Windows/Linux execution and native mouse/keyboard UI interaction remain unverified.
+
+Full pause/settings UI and preferences now supersede the simple pause status: see pause-settings-menu.md.

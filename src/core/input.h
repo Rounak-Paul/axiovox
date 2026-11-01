@@ -19,9 +19,9 @@ typedef enum {
 } AxKey;
 typedef struct {
     AxEvents *events;
-    bool down[AX_KEY_COUNT], pressed[AX_KEY_COUNT], released[AX_KEY_COUNT];
+    bool down[AX_KEY_COUNT], pressed[AX_KEY_COUNT], released[AX_KEY_COUNT], repeated[AX_KEY_COUNT];
     bool consumed[AX_KEY_COUNT];
-    bool mouse_down[8], mouse_pressed[8], mouse_released[8], captured;
+    bool mouse_down[8], mouse_pressed[8], mouse_released[8], captured, focus_lost;
     double mouse_x, mouse_y, scroll_x, scroll_y;
 } AxInput;
 /** Resets per-frame transitions before polling OS events. Owner-thread only. */

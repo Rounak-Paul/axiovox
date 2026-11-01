@@ -40,6 +40,8 @@ static int hit_icon(float x, float y, float width, float height)
 static void toggle_pause(AxHud *hud, AxInput *input)
 {
     hud->paused = !hud->paused;
+    if (hud->paused) ax_menu_open_pause(&hud->menu);
+    else hud->menu.page = AX_MENU_NONE;
     AxEvent event = {.type = AX_EVENT_PAUSE_CHANGED, .data.pause = {hud->paused}};
     ax_event_emit(input->events, &event);
 }
@@ -50,7 +52,12 @@ void ax_hud_update(AxHud *hud, AxInput *input, AxConsole *console, double time, 
         hud->output_time = time;
     }
     float scale = ax_hud_scale(hud);
-    if (input->mouse_pressed[0]) {
+    if (hud->paused && console->open) hud->menu.pressed_id = -1;
+    bool menu_input = hud->paused && !console->open;
+    if (menu_input && ax_menu_update(&hud->menu, input, width / scale, height / scale,
+                                    (float)input->mouse_x / scale, (float)input->mouse_y / scale) == AX_MENU_RESUME)
+        toggle_pause(hud, input);
+    if (!menu_input && input->mouse_pressed[0]) {
         int icon = hit_icon((float)input->mouse_x / scale, (float)input->mouse_y / scale, width / scale, height / scale);
         if (icon == 0) ax_console_open(console, !console->open);
         if (icon == 1) toggle_pause(hud, input);
@@ -197,8 +204,8 @@ void ax_hud_draw(const AxHud *hud, AxUiCanvas *canvas, const AxConsole *console,
     if (hud->paused) {
         ax_ui_rect(canvas, 0, 0, canvas->width, canvas->height, (AxUiColor){0,0,0,0.35f});
         if (!console->open) {
-            float width = ax_ui_text_width(canvas->font, "PAUSED", 6);
-            label(canvas, "PAUSED", floorf((canvas->width - width) / 2), floorf(canvas->height / 2), canvas->width, paper);
+            float scale = ax_hud_scale(hud);
+            ax_menu_draw(&hud->menu, canvas, (float)console->input->mouse_x / scale, (float)console->input->mouse_y / scale);
         }
     }
     if (console->open) command_overlay(canvas, console, margin, time);
@@ -216,5 +223,5 @@ void ax_hud_draw(const AxHud *hud, AxUiCanvas *canvas, const AxConsole *console,
             feedback(canvas, console, margin, canvas->height - margin - 68, fminf(640, canvas->width - margin * 2), 3, alpha);
         }
     }
-    controls(canvas, hud, console, margin);
+    if (!hud->paused || console->open) controls(canvas, hud, console, margin);
 }

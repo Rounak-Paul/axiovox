@@ -1,5 +1,6 @@
 #pragma once
 #include "core/window.h"
+#include "device_info.h"
 #define AX_RENDER_FRAMES 2
 #define AX_RENDER_NODES 32
 typedef struct {
@@ -15,6 +16,8 @@ typedef struct {
     VkInstance instance;
     VkSurfaceKHR surface;
     VkPhysicalDevice physical;
+    AxDeviceInfo *devices;
+    uint32_t device_count;
     VkDevice device;
     VkQueue graphics_queue, present_queue;
     uint32_t graphics_family, present_family, selected_index, api_version;

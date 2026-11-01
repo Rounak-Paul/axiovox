@@ -123,7 +123,7 @@ static bool record_ui(const AxRenderFrame *frame, void *user)
     float scale = ax_hud_scale(&ui->hud);
     float width = frame->extent.width / frame->scale_x / scale, height = frame->extent.height / frame->scale_y / scale;
     AxUiVertex *vertices = ui->vertices[frame->frame_index].mapped;
-    AxUiCanvas canvas = {vertices, 0, AX_UI_VERTICES, &ui->font, width, height};
+    AxUiCanvas canvas = {.vertices = vertices, .capacity = AX_UI_VERTICES, .font = &ui->font, .width = width, .height = height};
     ax_hud_draw(&ui->hud, &canvas, console, glfwGetTime());
     VkCommandBuffer command = frame->command;
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, ui->pipeline);
@@ -175,4 +175,10 @@ void ax_ui_update(AxUi *ui, double time)
     int width, height;
     glfwGetWindowSize(ui->renderer->window->handle, &width, &height);
     ax_hud_update(&ui->hud, ui->console->input, ui->console, time, (float)width, (float)height);
+}
+
+void ax_ui_bind_settings(AxUi *ui, AxConfig *config, const char *settings_path)
+{
+    ax_menu_bind(&ui->hud.menu, config, settings_path, ui->console->commands,
+                 ui->renderer->devices, ui->renderer->device_count);
 }
