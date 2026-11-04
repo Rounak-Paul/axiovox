@@ -119,3 +119,25 @@ void ax_noise_warp3(const AxNoise *noise,const double p[3],double amplitude,doub
         out[k]=q[k]+amplitude*gradient_sample(noise,channel,0).value;
     }
 }
+
+double ax_noise_erosion3(const AxNoise *noise,const double p[3],unsigned octaves)
+{
+    if (!valid(noise,p)) return 0;
+    if (!octaves) octaves=1;
+    if (octaves>8) octaves=8;
+    double sum=0,total=0,amplitude=1,frequency=1,drift[3]={0};
+    for (unsigned i=0;i<octaves;++i) {
+        double q[3];
+        for (size_t k=0;k<3;++k) q[k]=(p[k]+0.18*drift[k])*frequency+i*19.19;
+        AxNoiseSample sample=gradient_sample(noise,q,1);
+        double n=sample.value*1.8;
+        double ridge=1-fmin(1,sqrt(n*n+0.0025)-0.05);
+        ridge*=ridge;
+        sum+=amplitude*ridge;
+        total+=amplitude;
+        for (size_t k=0;k<3;++k) drift[k]-=amplitude*sample.gradient[k]*n;
+        frequency*=2.03;
+        amplitude*=0.48*fmax(0.1,ridge);
+    }
+    return sum/total;
+}

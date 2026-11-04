@@ -36,7 +36,7 @@ target_link_libraries(axiovox_core PUBLIC Threads::Threads)
 
 set(generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${generated_dir}")
-foreach(shader IN ITEMS ui.vert ui.frag world.vert world.frag world_sky.vert world_sky.frag world_composite.frag)
+foreach(shader IN ITEMS ui.vert ui.frag world.vert world.frag world_sky.vert world_sky.frag world_composite.frag world_water.frag)
     add_custom_command(
         OUTPUT "${generated_dir}/${shader}.inc"
         COMMAND Vulkan::glslc --target-env=vulkan1.2 -O -mfmt=c
@@ -108,7 +108,7 @@ endif()
 
 add_library(axiovox_world_renderer STATIC src/world/world_renderer.c
     "${generated_dir}/world.vert.inc" "${generated_dir}/world.frag.inc" "${generated_dir}/world_shadow.frag.inc"
-    "${generated_dir}/world_sky.vert.inc" "${generated_dir}/world_sky.frag.inc" "${generated_dir}/world_composite.frag.inc")
+    "${generated_dir}/world_sky.vert.inc" "${generated_dir}/world_sky.frag.inc" "${generated_dir}/world_composite.frag.inc" "${generated_dir}/world_water.frag.inc")
 target_include_directories(axiovox_world_renderer PRIVATE "${generated_dir}")
 target_link_libraries(axiovox_world_renderer PUBLIC axiovox_renderer axiovox_world)
 

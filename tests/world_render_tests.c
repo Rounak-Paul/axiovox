@@ -148,6 +148,24 @@ int main(void)
     CHECK(moon_x<renderer.extent.width && pixels[moon]+pixels[moon+1]+pixels[moon+2]>90);
     int surface_green=2*pixels[center+1]-pixels[center]-pixels[center+2];
     CHECK(surface_green>30);
+    uint8_t dry_surface[3]={pixels[center],pixels[center+1],pixels[center+2]};
+    uint8_t dry_moon[3]={pixels[moon],pixels[moon+1],pixels[moon+2]};
+    world.ocean_radius=9;
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    CHECK(!memcmp(dry_surface,pixels+center,3));
+    world.ocean_radius=12;
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    CHECK(abs((int)pixels[center]-dry_surface[0])+abs((int)pixels[center+1]-dry_surface[1])+abs((int)pixels[center+2]-dry_surface[2])>20);
+    CHECK(!memcmp(dry_moon,pixels+moon,3));
+    CHECK(ax_position_from_meters(&world.view_origin,(double[3]){0,0,11}));
+    world.ocean_radius=0;
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    uint8_t underwater_dry[3]={pixels[center],pixels[center+1],pixels[center+2]};
+    world.ocean_radius=12;
+    CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+    CHECK(memcmp(underwater_dry,pixels+center,3));
+    world.ocean_radius=0;
+    CHECK(ax_position_from_meters(&world.view_origin,(double[3]){0,0,40}));
     CHECK(ax_world_renderer_set_view(&world,AX_WORLD_VIEW_NORMALS));
     CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
     CHECK(abs((int)pixels[center+1]-128)<20 && pixels[center]>230);
@@ -285,6 +303,7 @@ int main(void)
     world.shadows_enabled=true;
     CHECK(!ax_world_renderer_fade_geometry(&world,&(AxWorldGeometry){0}) && world.fade==0);
     destroy_capture(&capture);
+    world.ocean_radius=12;
     CHECK(ax_world_geometry_build(&scene,&plane,1,&refined));
     CHECK(ax_world_renderer_fade_geometry(&world,&refined) && world.fade==1);
     ax_world_geometry_destroy(&geometry); geometry=refined; refined=(AxWorldGeometry){0}; world.geometry=&geometry;
@@ -301,6 +320,39 @@ int main(void)
     ax_world_geometry_destroy(&geometry); geometry=refined; refined=(AxWorldGeometry){0}; world.geometry=&geometry;
     CHECK(ax_world_renderer_set_view(&world,AX_WORLD_VIEW_WIREFRAME));
     CHECK(ax_renderer_switch_device(&renderer,-1) && draw(&renderer,3));
+    for (size_t i=0;i<4;++i) {
+        float x=(i==1 || i==2) ? 1024 : -1024,z=i>=2 ? -1024 : 1024;
+        plane_vertices[i]=(AxSurfaceVertex){.position={x,-0.3f,z},.normal={0,1,0},.color=0xff80a0b0};
+    }
+    CHECK(ax_world_geometry_build(&scene,&plane,1,&refined));
+    CHECK(ax_world_renderer_set_geometry(&world,&refined));
+    ax_world_geometry_destroy(&geometry); geometry=refined; refined=(AxWorldGeometry){0}; world.geometry=&geometry;
+    CHECK(ax_world_renderer_set_view(&world,AX_WORLD_VIEW_DEFAULT));
+    world.ocean_radius=1000000; world.ocean_center[1]=-1000000;
+    world.local_up[0]=0; world.local_up[1]=1; world.local_up[2]=0;
+    world.altitude=10; world.atmosphere_height=10000; world.shadows_enabled=false;
+    ax_camera_init(&camera,NULL,0,0,NULL);
+    CHECK(ax_position_from_meters(&world.view_origin,(double[3]){0,10,0}));
+    CHECK(create_capture(&capture,&renderer));
+    pixels=capture.pixels.mapped;
+    center=((size_t)renderer.extent.height/2*renderer.extent.width+renderer.extent.width/2)*4;
+    double nx=(2.0*(renderer.extent.width/2+0.5)/renderer.extent.width-1)*tanf(camera.fov_y/2)*renderer.extent.width/renderer.extent.height;
+    double ny=(2.0*(renderer.extent.height/2+0.5)/renderer.extent.height-1)*tanf(camera.fov_y/2);
+    double incidence=0.15,altitude_ratio=10.0/world.ocean_radius;
+    double altitude_term=altitude_ratio*(2+altitude_ratio);
+    double crossing=atan(ny)-asin(sqrt((incidence*incidence+altitude_term)/(1+altitude_term))*
+        sqrt((1+nx*nx+ny*ny)/(1+ny*ny)));
+    for (unsigned sample=0;sample<8;++sample) {
+        world.water_time=sample*7;
+        camera.pitch=(float)(crossing-0.00002);
+        CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+        int before[3]={pixels[center],pixels[center+1],pixels[center+2]};
+        camera.pitch=(float)(crossing+0.00002);
+        CHECK(draw(&renderer,2) && vkDeviceWaitIdle(renderer.device)==VK_SUCCESS);
+        int delta=0;
+        for (size_t channel=0;channel<3;++channel) delta+=abs((int)pixels[center+channel]-before[channel]);
+        CHECK(delta<=12);
+    }
     status=EXIT_SUCCESS;
 cleanup:
     free(baseline);

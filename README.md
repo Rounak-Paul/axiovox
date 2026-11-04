@@ -83,11 +83,21 @@ Resolution is independent of the precise coordinate addressing system.
 
 Terrain composes seeded 3D gradient/value noise, normalized fBm, ridged noise,
 cellular fields and domain warping. Terra combines continental basins, plains, hills,
-mountain provinces, ridges, detail and bounded cave channels. Luna uses layered crater
-bowls/rims and rough highlands. Spherical sampling has no latitude/longitude seams.
-Temperature, moisture, elevation and slope blend grass, soil, rock, sand and snow continuously.
+connected interior and continental-margin mountain belts, main crests, branching ridges,
+smoother valley floors and passes, foothills, terraces, coastal cliffs and shallow shelves,
+plus detail and bounded cave channels.
+Luna uses sparse impacts of varying sizes with raised rims, bowls and central peaks,
+broad dark basins and rough brighter highlands. Spherical sampling has no latitude/longitude seams.
+Temperature, moisture, elevation, valley deposition, vegetation cover and slope blend
+grass, soil, rock, beach sand and slope-dependent snow continuously.
 Cave channels appear only in chunks with 2 m spacing or finer; coarser chunks cannot resolve them, and channels close at that boundary.
-These are procedural landforms, not simulated erosion, drainage or ocean fluids.
+These are procedural landforms, not simulated erosion or drainage. The first continental
+body has a spherical ocean at its reference radius; Luna stays dry. Water adapts
+procedural wave normals, spectral depth absorption, refraction, Fresnel sky reflection,
+sun highlights, shore/crest foam and shallow caustics to the rendered terrain depth.
+The ocean remains continuous from shore to space and through terrain LOD fades.
+Underwater views attenuate the seabed and surface by water depth. Counter-flowing choppy wave octaves displace the analytic surface and perturb its normals;
+there is no fluid simulation. Orbital views include a thin atmospheric scattering shell. Debug views show terrain.
 
 Generated meshes use meshoptimizer for attribute-aware simplification and
 vertex-cache/fetch ordering. A two-cell band around chunk boundaries and material

@@ -67,13 +67,35 @@ static bool visit_planet(Application *app, AxPlanetId id)
     double base[3];
     for (size_t k=0;k<3;++k) base[k]=direction[k]*radius;
     double height=ax_planet_terrain_height(planet,base);
+    float arrival_yaw=0,arrival_pitch=-0.15f;
     if (ax_planet_description(planet)->terrain_kind==AX_TERRAIN_CONTINENTAL) {
-        double score=fabs(height-ax_planet_description(planet)->terrain_height*0.12);
-        for (unsigned i=0;i<24;++i) {
-            double angle=i*2.399963229728653,candidate[3]={sqrt(0.75)*cos(angle),0.5,sqrt(0.75)*sin(angle)};
+        double score=-INFINITY,relief=ax_planet_description(planet)->terrain_height;
+        for (unsigned i=0;i<96;++i) {
+            double angle=i*2.399963229728653,y=-0.6+1.2*(i+0.5)/96;
+            double candidate[3]={sqrt(1-y*y)*cos(angle),y,sqrt(1-y*y)*sin(angle)};
             for (size_t k=0;k<3;++k) base[k]=candidate[k]*radius;
-            double h=ax_planet_terrain_height(planet,base),distance=fabs(h-ax_planet_description(planet)->terrain_height*0.12);
-            if (distance<score) { score=distance; height=h; memcpy(direction,candidate,sizeof(direction)); }
+            double h=ax_planet_terrain_height(planet,base);
+            if (h<relief*0.03 || h>relief*0.3) continue;
+            AxCamera orientation;
+            ax_camera_init(&orientation,NULL,0,0,candidate);
+            for (unsigned heading=0;heading<8;++heading) {
+                orientation.yaw=(float)(heading*0.7853981633974483);
+                float forward[3]; ax_camera_basis(&orientation,forward,NULL,NULL);
+                double ahead[3];
+                double distance=fmin(18000,radius*0.04);
+                for (size_t k=0;k<3;++k) ahead[k]=base[k]+forward[k]*distance;
+                double peak=ax_planet_terrain_height(planet,ahead);
+                double near_distance=fmin(100,distance*0.05);
+                for (size_t k=0;k<3;++k) ahead[k]=base[k]+forward[k]*near_distance;
+                double near_height=ax_planet_terrain_height(planet,ahead);
+                double grade=fabs(near_height-h)/near_distance;
+                if (grade>0.6) continue;
+                double interest=peak-h-fabs(h-relief*0.10)*0.5-grade*relief*0.3;
+                if (interest>score) {
+                    score=interest; height=h; arrival_yaw=orientation.yaw; arrival_pitch=0.02f;
+                    memcpy(direction,candidate,sizeof(direction));
+                }
+            }
         }
     }
     for (size_t k=0;k<3;++k) base[k]=direction[k]*(radius+height+12);
@@ -90,7 +112,7 @@ static bool visit_planet(Application *app, AxPlanetId id)
     ax_world_stream_destroy(&previous, app->jobs);
     app->active_planet = id;
     app->view_origin = eye;
-    ax_camera_init(&app->camera, (float[3]){0,0,0}, 0, -0.15f,direction);
+    ax_camera_init(&app->camera, (float[3]){0,0,0}, arrival_yaw,arrival_pitch,direction);
     return true;
 }
 /** Reconciles a small float flight displacement with the precise planet frame and updates continuous LOD streaming. */
@@ -104,9 +126,14 @@ static bool update_world(Application *app)
     const AxPlanetDesc *frame = ax_planet_description(anchor);
     app->world_renderer.view_origin = app->view_origin;
     memcpy(app->world_renderer.frame_center, frame->center, sizeof(frame->center));
+    app->world_renderer.ocean_radius=0;
     double nearest = INFINITY;
     for (size_t i = 0; i < app->scene.count; ++i) {
         const AxPlanetDesc *body = ax_planet_description(app->scene.planets[i]);
+        if (app->world_renderer.ocean_radius==0 && body->terrain_kind==AX_TERRAIN_CONTINENTAL) {
+            memcpy(app->world_renderer.ocean_center,body->center,sizeof(body->center));
+            app->world_renderer.ocean_radius=body->radius;
+        }
         AxPosition local = app->view_origin;
         double delta[3];
         for (size_t k = 0; k < 3; ++k) delta[k] = frame->center[k] - body->center[k];
@@ -324,7 +351,7 @@ int main(int argc, char **argv)
     app.jobs = ax_jobs_create((size_t)ax_config_get(&app.config, "jobs.workers")->value);
     if (!app.jobs) { ax_log(AX_LOG_ERROR, "Worker pool creation failed"); goto cleanup; }
     ax_scene_init(&app.scene, &events);
-    AxPlanetDesc first = {.id = 1, .seed = 42, .radius = 1000000, .terrain_height = 6500, .terrain_frequency = 0.005, .terrain_kind = AX_TERRAIN_CONTINENTAL, .surface_gravity = 9.81, .cave_depth = 128};
+    AxPlanetDesc first = {.id = 1, .seed = 42, .radius = 1000000, .terrain_height = 10000, .terrain_frequency = 0.005, .terrain_kind = AX_TERRAIN_CONTINENTAL, .surface_gravity = 9.81, .cave_depth = 128};
     AxPlanetDesc second = {.id = 2, .seed = 917, .center = {1200000, 1800000, -2400000}, .radius = 270000, .terrain_height = 2500, .terrain_frequency = 0.001, .terrain_kind = AX_TERRAIN_CRATERED, .surface_gravity = 1.62, .surface_material = AX_MATERIAL_ROCK};
     if (!ax_scene_add_planet(&app.scene, &first) || !ax_scene_add_planet(&app.scene, &second)) goto cleanup;
     struct timespec build_begin, build_end;

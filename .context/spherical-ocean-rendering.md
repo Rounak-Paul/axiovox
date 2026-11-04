@@ -1,0 +1,31 @@
+# Spherical ocean rendering
+
+## Source and scope
+Requested adaptation of QuasarEngine water. Inspected `/Users/duke/Code/QuasarEngine/orbit/materials/Water/assets/materials/water.qsmat` and its README. Adapted the material's spectral absorption (0.3, 0.06, 0.02), shallow/deep palette, foam width, refracted scene transmission and caustic layering. This engine has no material graph runtime, so the optical composition lives in `shaders/world_water.frag`.
+
+## Ownership
+- Application chooses the first continental body's reference-radius ocean each frame; cratered bodies remain dry. Ocean center is in scene coordinates. It follows scene loads and planet visits without separate navigation state or saved render caches.
+- `AxWorldRenderer` owns ocean center/radius and a bounded animation clock. Radius zero disables it. GPU state owns one reusable opaque color target, sampled depth, a fullscreen water pipeline, and fence-protected per-frame water buffers. Device migration and resize use the existing transactional lifecycle.
+- Each terrain cut renders opaque color/depth, then water into its own final color before the existing LOD fade. Explicit barriers separate attachment writes and shader reads, including reuse of the shared opaque/depth targets between cuts.
+- Sphere intersections use CPU-computed double altitude in the quadratic constant to avoid subtracting squared planet radii near shore. Wave phase uses wrapped planet-local coordinates, preserving camera-relative precision and continuity. Wave frequencies/time periods match the wrap domain. Pixel-footprint attenuation suppresses distant wave aliasing.
+
+## Appearance
+Procedural layered wave normals, Fresnel sky reflection, sun highlights, depth absorption, screen-space refraction with foreground rejection, shore/crest foam, shallow caustics, local terrain shadows and atmosphere. Underwater terrain and surface views receive absorption. Terrain debug modes bypass water. The ocean has no fluid simulation, geometric wave displacement or underwater reflection tracing; reflection uses the analytic sky. One ocean body is rendered, matching the default Terra/Luna scene.
+
+## Validation
+Release shader/C builds pass. GPU capture assertions verify submerged-terrain coverage, dry-terrain occlusion, an unaffected neighboring moon and underwater attenuation. Resize, fading and device migration also exercise the water path. All 14 Release CTests pass (26.05 s). The GPU test passes again after enabling water through fade, resize and migration (1.75 s). Default-world eight-frame smoke run passes. git diff --check passes. No full-world visual review or frame-time benchmark claimed.
+
+## Reference-wave and orbital rebuild (supersedes generic wave description above)
+The user rejected the initial sine-wave approximation. Inspected `Quasar/src/material/qs_material_glsl.c` actual `qs_wave_octave`, `qs_wave`, `qs_value2` and `qs_bump_height`. Ported the noise-distorted choppy counter-flowing wave octave and source parameters (height 1.3, frequency .08, speed 1.5, choppiness 4, rotated octave frequency 1.9 and amplitude .22). Triplanar blending adapts the planar function to a sphere. Pixel-footprint filtering suppresses distant octaves; a first-order radial intersection correction now supplies actual displaced water depth and shore silhouettes away from grazing rays. Finite differences use source bump strength .5. Crest foam is noise-broken rather than uniform white streaks. The bounded clock cross-fades the last eight seconds to the next cycle.
+
+Ocean shading now transitions from the reference shallow palette to blue offshore scattering. Six atmospheric samples integrate a thin radial shell for orbital views with terrain/ocean depth occlusion; ground views retain their existing fog. The existing renderer differs from Quasar's sky/GI/transparent lighting: this is a source-wave adaptation, not verified pixel parity.
+
+Visual QA used actual Vulkan shaders with diagnostic sampled terrain/globe/shoreline geometry (not the live stream). `/tmp/axiovox-globe.png` shows continental oceans, polar ice and a blue atmospheric limb; `/tmp/axiovox-shore.png` checks shallow transmission and choppy water. All 14 Release CTests pass (30.14 s). After the canonical 16-bit edge precision change, surface/stream tests pass again; after final water normal/foam changes, procedural/GPU-render tests pass again. Release build, default-world smoke test and git diff --check pass. Durable final diagnostic captures are `.context/previews/earthlike-{globe,mountains,shore}.png`.
+
+## Calmer water scale
+User found the reference waves too busy. Base frequency is .025 instead of .08 (3.2x larger features), choppiness 2.5 instead of 4, two octaves instead of three and fine-octave amplitude .14 instead of .22. Foam breakup is ~4x broader, offshore crest foam coverage reduced, and caustic interference is ~3x broader. This preserves the source wave family while reducing high-frequency visual activity and shader work. Final shoreline/globe previews refreshed. Release build and all 14 CTests pass (30.01 s), including surface seams, streaming and water GPU checks. Smoke test and git diff --check pass. Rendered shoreline review confirms substantially calmer, broader wave features.
+
+## Shoreline line artifact
+Confirmed the wave intersection had a discontinuous `abs(incidence)>0.15` branch, abruptly toggling several meters of ray displacement along a camera-facing contour. Replaced it with continuously damped reciprocal incidence (cosine / (cosine squared + 0.0025)); it approaches the ordinary correction away from grazing rays and fades smoothly at tangency. Foam uses perpendicular water depth, while absorption retains optical path length. This avoids compressing shore foam to a thin stripe at grazing angles.
+
+Added a GPU regression rendering a 0.3 m submerged seabed on a 1,000 km sphere, sweeping the old cutoff with eight animation phases. The test fails with the original cutoff restored and passes with the fix (12 total RGB levels tolerance for a 0.00004 radian pitch change). Diagnostic shoreline/globe previews refreshed. Release build, all 14 CTests (29.43 s), final procedural/GPU regressions, default-world smoke test and git diff --check pass.

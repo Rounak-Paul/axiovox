@@ -19,3 +19,6 @@ double ax_noise_fractal3(const AxNoise *noise, const double position[3], unsigne
 double ax_noise_cellular3(const AxNoise *noise, const double position[3]);
 /** Warps position by three decorrelated coherent channels, bounded by amplitude per axis. */
 void ax_noise_warp3(const AxNoise *noise, const double position[3], double amplitude, double warped[3]);
+
+/** Returns bounded [0,1] erosion-inspired ridges at position; coarse gradients steer up to eight finer octaves. */
+double ax_noise_erosion3(const AxNoise *noise,const double position[3],unsigned octaves);

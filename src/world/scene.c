@@ -121,7 +121,7 @@ static double sample_field(const AxPlanet *planet,const AxPosition *position,boo
         result=depth<-2 ? AX_MATERIAL_ROCK : depth<-0.25 ? AX_MATERIAL_SOIL : AX_MATERIAL_GRASS;
         if (d->terrain_kind==AX_TERRAIN_CONTINENTAL && depth>=-0.25) {
             if (climate.temperature<0.22) result=AX_MATERIAL_SNOW;
-            else if (climate.elevation<d->terrain_height*0.025) result=AX_MATERIAL_SAND;
+            else if (climate.elevation<fmin(30,d->terrain_height*0.005)) result=AX_MATERIAL_SAND;
             else if (climate.moisture<0.35) result=AX_MATERIAL_SOIL;
         }
         if (d->surface_material != AX_MATERIAL_AIR) result = d->surface_material;
@@ -173,13 +173,28 @@ uint32_t ax_planet_surface_color(const AxPlanet *planet,const AxPosition *positi
         apply_edits(planet,&normalized,field,&edited);
         if (edited!=AX_MATERIAL_AIR) material_color(edited,rgb);
         else if (field>depth+1e-5) material_color(AX_MATERIAL_ROCK,rgb);
-        else if (d->surface_material!=AX_MATERIAL_AIR) material_color(d->surface_material,rgb);
+        else if (d->surface_material!=AX_MATERIAL_AIR) {
+            material_color(d->surface_material,rgb);
+            if (d->terrain_kind==AX_TERRAIN_CRATERED) {
+                double highland=ramp(-d->terrain_height*0.12,d->terrain_height*0.18,climate.elevation);
+                double brightness=0.72+0.28*highland+0.12*ramp(0.9,0.6,slope);
+                for (size_t k=0;k<3;++k) rgb[k]=fmin(255,rgb[k]*brightness);
+            }
+        }
         else {
             material_color(AX_MATERIAL_GRASS,rgb);
             if (d->terrain_kind==AX_TERRAIN_CONTINENTAL) {
-                blend_material(rgb,AX_MATERIAL_SOIL,ramp(0.42,0.28,climate.moisture));
-                blend_material(rgb,AX_MATERIAL_SAND,ramp(d->terrain_height*0.04,d->terrain_height*0.01,climate.elevation));
-                blend_material(rgb,AX_MATERIAL_SNOW,ramp(0.28,0.16,climate.temperature));
+                double vegetation=0.82+0.36*climate.cover;
+                for (size_t k=0;k<3;++k) rgb[k]*=vegetation;
+                double dry_soil=ramp(0.44,0.25,climate.moisture);
+                double sediment=climate.valley*ramp(0.82,0.98,slope)*(1-climate.moisture)*0.5;
+                blend_material(rgb,AX_MATERIAL_SOIL,fmax(dry_soil,sediment));
+                double beach=fmax(0.01,fmin(30,d->terrain_height*0.005));
+                blend_material(rgb,AX_MATERIAL_SAND,fmax(d->terrain_height>0 ? ramp(beach,0,climate.elevation) : 0,
+                    ramp(0.38,0.22,climate.moisture)*ramp(0.35,0.65,climate.temperature)));
+                blend_material(rgb,AX_MATERIAL_ROCK,ramp(d->terrain_height*0.38,d->terrain_height*0.68,climate.elevation));
+                double snow=ramp(0.28,0.16,climate.temperature+(climate.cover-0.5)*0.08)*ramp(0.45,0.90,slope);
+                blend_material(rgb,AX_MATERIAL_SNOW,snow);
             }
             blend_material(rgb,AX_MATERIAL_ROCK,ramp(0.75,0.55,slope));
         }

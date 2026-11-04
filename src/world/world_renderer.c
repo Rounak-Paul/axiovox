@@ -22,14 +22,15 @@ enum { SLOT_CURRENT, SLOT_PREVIOUS, SLOT_COUNT };
 typedef struct {
     Cut cuts[SLOT_COUNT];
     AxBuffer regions[SLOT_COUNT][AX_RENDER_FRAMES];
-    Target color[SLOT_COUNT], depth, shadow;
+    Target color[SLOT_COUNT], opaque, depth, shadow;
+    AxBuffer water[AX_RENDER_FRAMES];
     bool previous_readable;
     VkExtent2D extent;
     VkDescriptorSetLayout descriptor_layout;
     VkDescriptorPool pool;
     VkDescriptorSet sets[SLOT_COUNT][AX_RENDER_FRAMES];
     VkPipelineLayout layout;
-    VkPipeline terrain, shadow_pipeline, sky, composite, wireframe, depth_only;
+    VkPipeline terrain, shadow_pipeline, sky, composite, water_pipeline, wireframe, depth_only;
     VkSampler color_sampler, shadow_sampler;
 } Device;
 typedef struct { float offset_extent[4]; uint32_t identity[4]; } GpuRegion;
@@ -50,6 +51,9 @@ static const uint32_t fullscreen_vertex[]=
 ;
 static const uint32_t sky_fragment[]=
 #include "world_sky.frag.inc"
+;
+static const uint32_t water_fragment[]=
+#include "world_water.frag.inc"
 ;
 static const uint32_t composite_fragment[]=
 #include "world_composite.frag.inc"
@@ -189,12 +193,15 @@ static void destroy_device(AxRenderer *r,void *user,void *state)
     if (gpu->terrain) vkDestroyPipeline(r->device,gpu->terrain,NULL);
     if (gpu->shadow_pipeline) vkDestroyPipeline(r->device,gpu->shadow_pipeline,NULL);
     if (gpu->sky) vkDestroyPipeline(r->device,gpu->sky,NULL);
+    if (gpu->water_pipeline) vkDestroyPipeline(r->device,gpu->water_pipeline,NULL);
     if (gpu->composite) vkDestroyPipeline(r->device,gpu->composite,NULL);
     if (gpu->layout) vkDestroyPipelineLayout(r->device,gpu->layout,NULL);
     if (gpu->pool) vkDestroyDescriptorPool(r->device,gpu->pool,NULL);
     if (gpu->descriptor_layout) vkDestroyDescriptorSetLayout(r->device,gpu->descriptor_layout,NULL);
     if (gpu->color_sampler) vkDestroySampler(r->device,gpu->color_sampler,NULL);
     if (gpu->shadow_sampler) vkDestroySampler(r->device,gpu->shadow_sampler,NULL);
+    destroy_target(r,&gpu->opaque);
+    for (size_t i=0;i<AX_RENDER_FRAMES;++i) ax_buffer_destroy(r,&gpu->water[i]);
     destroy_target(r,&gpu->depth); destroy_target(r,&gpu->shadow);
     for (size_t slot=0; slot<SLOT_COUNT; ++slot) {
         destroy_target(r,&gpu->color[slot]); destroy_cut(r,&gpu->cuts[slot]);
@@ -218,10 +225,13 @@ static bool create_device(AxRenderer *r,void *user,void **state)
         {.binding=0,.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,.descriptorCount=1,.stageFlags=VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT},
         {.binding=1,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.descriptorCount=1,.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT},
         {.binding=2,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.descriptorCount=1,.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT},
-        {.binding=3,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.descriptorCount=1,.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT}};
-    VkDescriptorSetLayoutCreateInfo set_layout={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=4,.pBindings=bindings};
+        {.binding=3,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.descriptorCount=1,.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT},
+        {.binding=4,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.descriptorCount=1,.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT},
+        {.binding=5,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.descriptorCount=1,.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT},
+        {.binding=6,.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,.descriptorCount=1,.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT}};
+    VkDescriptorSetLayoutCreateInfo set_layout={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=7,.pBindings=bindings};
     if (vkCreateDescriptorSetLayout(r->device,&set_layout,NULL,&gpu->descriptor_layout)!=VK_SUCCESS) return false;
-    VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,SLOT_COUNT*AX_RENDER_FRAMES},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,SLOT_COUNT*AX_RENDER_FRAMES*3}};
+    VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,SLOT_COUNT*AX_RENDER_FRAMES*2},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,SLOT_COUNT*AX_RENDER_FRAMES*5}};
     VkDescriptorPoolCreateInfo pool={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,.maxSets=SLOT_COUNT*AX_RENDER_FRAMES,.poolSizeCount=2,.pPoolSizes=sizes};
     if (vkCreateDescriptorPool(r->device,&pool,NULL,&gpu->pool)!=VK_SUCCESS) return false;
     VkDescriptorSetLayout layouts[SLOT_COUNT*AX_RENDER_FRAMES];
@@ -235,6 +245,15 @@ static bool create_device(AxRenderer *r,void *user,void **state)
         VkWriteDescriptorSet write={.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,.dstSet=gpu->sets[slot][i],.dstBinding=0,
             .descriptorCount=1,.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,.pBufferInfo=&buffer};
         vkUpdateDescriptorSets(r->device,1,&write,0,NULL);
+    }
+    for (size_t i=0;i<AX_RENDER_FRAMES;++i) {
+        if (!ax_buffer_create(r,&gpu->water[i],12*sizeof(float),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,true)) return false;
+        VkDescriptorBufferInfo buffer={gpu->water[i].handle,0,VK_WHOLE_SIZE};
+        for (size_t slot=0;slot<SLOT_COUNT;++slot) {
+            VkWriteDescriptorSet write={.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,.dstSet=gpu->sets[slot][i],.dstBinding=6,
+                .descriptorCount=1,.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,.pBufferInfo=&buffer};
+            vkUpdateDescriptorSets(r->device,1,&write,0,NULL);
+        }
     }
     VkPushConstantRange push={VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(View)};
     VkPipelineLayoutCreateInfo layout={.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,.setLayoutCount=1,
@@ -252,25 +271,28 @@ static bool create_device(AxRenderer *r,void *user,void **state)
     gpu->terrain=pipeline(r,gpu,terrain_vertex,sizeof(terrain_vertex),terrain_fragment,sizeof(terrain_fragment),true,false,true,0);
     gpu->shadow_pipeline=pipeline(r,gpu,terrain_vertex,sizeof(terrain_vertex),shadow_fragment,sizeof(shadow_fragment),true,true,true,0);
     gpu->sky=pipeline(r,gpu,fullscreen_vertex,sizeof(fullscreen_vertex),sky_fragment,sizeof(sky_fragment),false,false,true,0);
+    gpu->water_pipeline=pipeline(r,gpu,fullscreen_vertex,sizeof(fullscreen_vertex),water_fragment,sizeof(water_fragment),false,false,false,0);
     gpu->composite=pipeline(r,gpu,fullscreen_vertex,sizeof(fullscreen_vertex),composite_fragment,sizeof(composite_fragment),false,false,false,0);
     gpu->wireframe=pipeline(r,gpu,terrain_vertex,sizeof(terrain_vertex),terrain_fragment,sizeof(terrain_fragment),true,false,true,PIPELINE_LINES);
     gpu->depth_only=pipeline(r,gpu,terrain_vertex,sizeof(terrain_vertex),shadow_fragment,sizeof(shadow_fragment),true,false,true,PIPELINE_DEPTH);
-    return gpu->wireframe && gpu->depth_only && gpu->terrain && gpu->shadow_pipeline && gpu->sky && gpu->composite;
+    return gpu->wireframe && gpu->depth_only && gpu->terrain && gpu->shadow_pipeline && gpu->sky && gpu->composite && gpu->water_pipeline;
 }
 /** Stages resize attachments before retiring old targets and rewriting descriptors while idle. */
 static bool ensure_targets(AxWorldRenderer *world,Device *gpu,VkExtent2D extent)
 {
     if (gpu->extent.width==extent.width && gpu->extent.height==extent.height) return true;
     AxRenderer *r=world->renderer;
-    Target color[SLOT_COUNT]={{0}},depth={0};
-    bool created=create_target(r,VK_FORMAT_D32_SFLOAT,extent,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,VK_IMAGE_ASPECT_DEPTH_BIT,&depth);
+    Target color[SLOT_COUNT]={{0}},depth={0},opaque={0};
+    bool created=create_target(r,VK_FORMAT_D32_SFLOAT,extent,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT,&depth);
+    if (created) created=create_target(r,r->format,extent,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_COLOR_BIT,&opaque);
     for (size_t slot=0; created && slot<SLOT_COUNT; ++slot)
         created=create_target(r,r->format,extent,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_COLOR_BIT,&color[slot]);
     if (!created || vkDeviceWaitIdle(r->device)!=VK_SUCCESS) {
-        destroy_target(r,&depth);
+        destroy_target(r,&opaque); destroy_target(r,&depth);
         for (size_t slot=0; slot<SLOT_COUNT; ++slot) destroy_target(r,&color[slot]);
         return false;
     }
+    destroy_target(r,&gpu->opaque); gpu->opaque=opaque;
     destroy_target(r,&gpu->depth); gpu->depth=depth;
     for (size_t slot=0; slot<SLOT_COUNT; ++slot) { destroy_target(r,&gpu->color[slot]); gpu->color[slot]=color[slot]; }
     gpu->extent=extent; gpu->previous_readable=false;
@@ -278,11 +300,13 @@ static bool ensure_targets(AxWorldRenderer *world,Device *gpu,VkExtent2D extent)
         VkDescriptorImageInfo images[]={
             {gpu->shadow_sampler,gpu->shadow.view,VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL},
             {gpu->color_sampler,gpu->color[SLOT_CURRENT].view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-            {gpu->color_sampler,gpu->color[SLOT_PREVIOUS].view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-        VkWriteDescriptorSet writes[3];
-        for (uint32_t j=0; j<3; ++j) writes[j]=(VkWriteDescriptorSet){.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            {gpu->color_sampler,gpu->color[SLOT_PREVIOUS].view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+            {gpu->color_sampler,gpu->opaque.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+            {gpu->color_sampler,gpu->depth.view,VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}};
+        VkWriteDescriptorSet writes[5];
+        for (uint32_t j=0; j<5; ++j) writes[j]=(VkWriteDescriptorSet){.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet=gpu->sets[slot][i],.dstBinding=j+1,.descriptorCount=1,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.pImageInfo=&images[j]};
-        vkUpdateDescriptorSets(r->device,3,writes,0,NULL);
+        vkUpdateDescriptorSets(r->device,5,writes,0,NULL);
     }
     return true;
 }
@@ -373,6 +397,8 @@ static void draw_meshes(const AxRenderFrame *frame,const Cut *cut,Device *gpu,Vi
 static bool render_cut(const AxRenderFrame *frame,AxWorldRenderer *world,Device *gpu,size_t slot)
 {
     if (!update_regions(world,gpu,slot,frame->frame_index)) return false;
+    bool water=world->ocean_radius>0 && world->view==AX_WORLD_VIEW_DEFAULT;
+    Target *target=water ? &gpu->opaque : &gpu->color[slot];
     View view=view_constants(world,frame->extent);
     const Cut *cut=&gpu->cuts[slot];
     barrier(frame->command,&gpu->shadow,VK_IMAGE_ASPECT_DEPTH_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -389,12 +415,12 @@ static bool render_cut(const AxRenderFrame *frame,AxWorldRenderer *world,Device 
     frame->end_rendering(frame->command);
     barrier(frame->command,&gpu->shadow,VK_IMAGE_ASPECT_DEPTH_BIT,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    barrier(frame->command,&gpu->color[slot],VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    barrier(frame->command,target,VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_ACCESS_SHADER_READ_BIT,VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     barrier(frame->command,&gpu->depth,VK_IMAGE_ASPECT_DEPTH_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
-    VkRenderingAttachmentInfoKHR color={.sType=VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,.imageView=gpu->color[slot].view,
+        VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+    VkRenderingAttachmentInfoKHR color={.sType=VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,.imageView=target->view,
         .imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR,.storeOp=VK_ATTACHMENT_STORE_OP_STORE};
     depth.imageView=gpu->depth.view; depth.clearValue.depthStencil.depth=0;
     rendering.renderArea.extent=frame->extent; rendering.colorAttachmentCount=1; rendering.pColorAttachments=&color;
@@ -408,8 +434,22 @@ static bool render_cut(const AxRenderFrame *frame,AxWorldRenderer *world,Device 
         bind(frame,gpu,gpu->wireframe,frame->extent,slot); draw_meshes(frame,cut,gpu,&view,true);
     } else { bind(frame,gpu,gpu->terrain,frame->extent,slot); draw_meshes(frame,cut,gpu,&view,false); }
     frame->end_rendering(frame->command);
-    barrier(frame->command,&gpu->color[slot],VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    barrier(frame->command,target,VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    if (water) {
+        barrier(frame->command,&gpu->depth,VK_IMAGE_ASPECT_DEPTH_BIT,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        barrier(frame->command,&gpu->color[slot],VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_ACCESS_SHADER_READ_BIT,VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        color.imageView=gpu->color[slot].view; rendering.pDepthAttachment=NULL;
+        frame->begin_rendering(frame->command,&rendering);
+        bind(frame,gpu,gpu->water_pipeline,frame->extent,slot);
+        vkCmdPushConstants(frame->command,gpu->layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(view),&view);
+        vkCmdDraw(frame->command,3,1,0,0);
+        frame->end_rendering(frame->command);
+        barrier(frame->command,&gpu->color[slot],VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    }
     return true;
 }
 /** Renders the current cut and, during a fade, the outgoing cut, before the shared swapchain/UI scope opens. */
@@ -418,6 +458,23 @@ static bool prepass(const AxRenderFrame *frame,void *user)
     AxWorldRenderer *world=user;
     Device *gpu=frame->device_state;
     if (!gpu || !ensure_targets(world,gpu,frame->extent)) return false;
+    if (world->ocean_radius>0) {
+        AxPosition eye=world->view_origin;
+        double move[3]={world->camera->position[0],world->camera->position[1],world->camera->position[2]},position[3];
+        const AxPosition zero={0};
+        if (!ax_position_move(&eye,move)) return false;
+        ax_position_difference(&eye,&zero,position);
+        float water[12]={0};
+        for (size_t k=0;k<3;++k) position[k]+=world->frame_center[k]-world->ocean_center[k];
+        double distance=hypot(hypot(position[0],position[1]),position[2]);
+        for (size_t k=0;k<3;++k) {
+            water[k]=(float)position[k];
+            water[4+k]=distance>0 ? (float)(position[k]/distance) : (k==1 ? 1 : 0);
+            water[8+k]=(float)remainder(position[k],4096);
+        }
+        water[3]=(float)world->ocean_radius; water[7]=(float)(distance-world->ocean_radius); water[11]=(float)world->water_time;
+        memcpy(gpu->water[frame->frame_index].mapped,water,sizeof(water));
+    }
     if (!gpu->previous_readable) {
         barrier(frame->command,&gpu->color[SLOT_PREVIOUS],VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             0,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
@@ -480,7 +537,9 @@ bool ax_world_renderer_fade_geometry(AxWorldRenderer *world,const AxWorldGeometr
 }
 void ax_world_renderer_advance(AxWorldRenderer *world,double dt)
 {
-    if (!world || !(world->fade>0) || !isfinite(dt) || dt<=0) return;
+    if (!world || !isfinite(dt) || dt<=0) return;
+    world->water_time=fmod(world->water_time+fmod(dt,4096),4096);
+    if (!(world->fade>0)) return;
     world->fade=fmaxf(0,world->fade-fminf((float)dt,AX_WORLD_FADE_MAX_STEP)/AX_WORLD_FADE_SECONDS);
 }
 void ax_world_renderer_destroy(AxWorldRenderer *world)

@@ -11,6 +11,8 @@ typedef struct {
     AxPosition view_origin;
     double frame_center[3];
     float local_up[3], altitude, atmosphere_height, sun[3];
+    /** Ocean sphere in scene coordinates; radius zero disables water. */
+    double ocean_center[3], ocean_radius, water_time;
     bool shadows_enabled;
     AxWorldView view;
     float fade;

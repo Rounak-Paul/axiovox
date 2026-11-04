@@ -131,7 +131,7 @@ static bool append_vertex(Builder *b,const double p[3],bool movable,uint32_t *in
     b->mesh.vertices[b->mesh.vertex_count++]=vertex;
     return true;
 }
-/** Interpolates an edge in canonical endpoint order, making neighboring cells bit-identical. */
+/** Interpolates canonically on an 16-bit edge fraction, exactly representable in dyadic stream chunk frames. */
 static bool edge_vertex(Builder *b, const uint32_t a[3], const uint32_t c[3], bool shared, bool movable, uint32_t *index)
 {
     const uint32_t *lo = a, *hi = c;
@@ -140,7 +140,7 @@ static bool edge_vertex(Builder *b, const uint32_t a[3], const uint32_t c[3], bo
     double da = b->density[ia], dc = b->density[ic];
     double t = da == dc ? 0.5 : da / (da - dc);
     if (!isfinite(t)) return false;
-    t = fmax(0, fmin(1,t));
+    t = round(fmax(0,fmin(1,t))*0x1p16)*0x1p-16;
     size_t key = SIZE_MAX;
     if (movable && (t == 0 || t == 1)) key = (t == 0 ? ia : ic) * 4 + 3;
     else if (shared) {

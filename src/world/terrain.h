@@ -9,8 +9,8 @@ typedef struct {
     AxNoise broad,landforms,detail;
     double radius,relief,frequency,cave_depth,phase[3];
 } AxTerrain;
-/** Surface classification data, evaluated only when requested. */
-typedef struct { double elevation,temperature,moisture; } AxTerrainClimate;
+/** Surface climate and normalized valley/vegetation-cover masks, evaluated only when requested. */
+typedef struct { double elevation,temperature,moisture,valley,cover; } AxTerrainClimate;
 /** Validates and initializes immutable recipe state; invalid controls leave terrain unchanged. */
 bool ax_terrain_init(AxTerrain *terrain,AxTerrainKind kind,uint64_t seed,double radius,double relief,double frequency,double cave_depth);
 /** Returns bounded radial displacement; position is planet-local meters. climate may be NULL. */
